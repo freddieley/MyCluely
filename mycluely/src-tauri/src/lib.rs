@@ -33,7 +33,19 @@ fn http_client() -> &'static reqwest::Client {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_privacy_provider;
+    use super::{is_blocked_host, parse_tool_call, percent_decode, strip_tags, validate_privacy_provider};
+
+    #[test]
+    fn tool_helpers_work() {
+        assert_eq!(percent_decode("a%20b%2Fc+d%é"), "a b/c d%é");
+        assert_eq!(strip_tags("<p>Hi <b>there</b></p>").trim(), "Hi there");
+        assert!(is_blocked_host("localhost"));
+        assert!(is_blocked_host("192.168.1.5"));
+        assert!(!is_blocked_host("example.com"));
+        let (n, a) = parse_tool_call("<tool>{\"name\":\"web_search\",\"args\":{\"query\":\"x\"}}</tool>").unwrap();
+        assert_eq!(n, "web_search");
+        assert_eq!(a["query"], "x");
+    }
 
     #[test]
     fn full_privacy_rejects_cloud_provider() {
@@ -565,7 +577,7 @@ async fn transcribe_audio(
 
 async fn stream_lines<F>(
     mut response: reqwest::Response,
-    on_delta: &Channel<String>,
+    sink: &mut Sink<'_>,
     mut parse: F,
 ) -> Result<String, String>
 where
@@ -582,7 +594,7 @@ where
             let delta = delta?;
             if !delta.is_empty() {
                 full.push_str(&delta);
-                let _ = on_delta.send(delta);
+                sink.push(delta);
             }
         }
         Ok(())
@@ -599,25 +611,26 @@ where
         }
     }
     handle(&buffer, &mut full)?;
+    sink.finish();
     if full.trim().is_empty() {
         return Err("The assistant returned an empty response. Try again.".to_string());
     }
     Ok(full)
 }
 
-#[tauri::command]
-async fn send_chat_message(
-    messages: Vec<ChatMessage>,
-    personality: String,
-    provider: String,
-    model: String,
+async fn chat_round(
+    messages: &[ChatMessage],
+    personality: &str,
+    provider: &str,
+    model: &str,
     full_privacy: bool,
     screen_image: Option<String>,
-    on_delta: Channel<String>,
+    prompt_extra: &str,
+    sink: &mut Sink<'_>,
 ) -> Result<String, String> {
-    validate_privacy_provider(&provider, full_privacy)?;
+    validate_privacy_provider(provider, full_privacy)?;
 
-    if messages.is_empty() || messages.len() > 20 {
+    if messages.is_empty() || messages.len() > 24 {
         return Err("A conversation can include up to 20 recent messages.".to_string());
     }
     if messages.iter().any(|message| {
@@ -628,12 +641,13 @@ async fn send_chat_message(
         return Err("A message was empty or exceeded the 8,000-character limit.".to_string());
     }
 
-    let system_prompt = match personality.as_str() {
+    let base_prompt = match personality {
         "coach" => "You are Vela, a thoughtful, steady coach. Be warm, supportive, and practical. Help the user think clearly without being patronizing. Be concise unless they ask for depth.",
         "direct" => "You are Vela, a sharp and direct assistant. Lead with the answer, be concise, and skip filler. Be candid while staying respectful.",
         _ => "You are Vela, the user's clever, loyal wingmate. Be warm, quick-witted when it fits, encouraging but never fake. Keep answers useful and conversational; don't overdo jokes.",
     };
 
+    let system_prompt = format!("{base_prompt}{prompt_extra}");
     let screen_image = screen_image.filter(|image| !image.trim().is_empty());
     if screen_image
         .as_ref()
@@ -642,7 +656,7 @@ async fn send_chat_message(
         return Err("Screen snapshots must be JPEG images smaller than 6 MB.".to_string());
     }
 
-    match provider.as_str() {
+    match provider {
         "local" => {
             let tags = get_ollama_tags().await?;
             let installed = tags.models.iter().any(|candidate| candidate.name == model);
@@ -651,7 +665,7 @@ async fn send_chat_message(
                     "The local model '{model}' isn't installed in Ollama. Install it, then refresh models."
                 ));
             }
-            if screen_image.is_some() && !model_supports_vision(&model).await? {
+            if screen_image.is_some() && !model_supports_vision(model).await? {
                 return Err(
                     "This local model can't view images. Select an Ollama vision model to use screen context."
                         .to_string(),
@@ -661,7 +675,7 @@ async fn send_chat_message(
                 "role": "system",
                 "content": system_prompt
             })];
-            for message in &messages {
+            for message in messages {
                 let mut body = json!({
                     "role": message.role,
                     "content": message.content
@@ -702,7 +716,7 @@ async fn send_chat_message(
                     .and_then(|value| value["error"].as_str().map(str::to_string));
                 return Err(message.unwrap_or_else(|| format!("Ollama returned {status}.")));
             }
-            stream_lines(response, &on_delta, |line| {
+            stream_lines(response, sink, |line| {
                 let value: Value = serde_json::from_str(line).ok()?;
                 if let Some(error) = value["error"].as_str() {
                     return Some(Err(error.to_string()));
@@ -770,7 +784,7 @@ async fn send_chat_message(
                     .and_then(|value| value["error"]["message"].as_str().map(str::to_string));
                 return Err(message.unwrap_or_else(|| format!("OpenAI returned {status}.")));
             }
-            stream_lines(response, &on_delta, |line| {
+            stream_lines(response, sink, |line| {
                 let data = line.strip_prefix("data:")?.trim();
                 if data == "[DONE]" {
                     return None;
@@ -784,6 +798,105 @@ async fn send_chat_message(
         }
         _ => Err("Choose either OpenAI or a local Ollama model.".to_string()),
     }
+}
+
+struct Sink<'a> {
+    channel: &'a Channel<String>,
+    guard: bool,
+    held: String,
+    decided: bool,
+    is_tool: bool,
+}
+
+impl<'a> Sink<'a> {
+    fn new(channel: &'a Channel<String>, guard: bool) -> Self {
+        Self { channel, guard, held: String::new(), decided: !guard, is_tool: false }
+    }
+
+    fn push(&mut self, delta: String) {
+        if self.decided {
+            if !self.is_tool {
+                let _ = self.channel.send(delta);
+            }
+            return;
+        }
+        self.held.push_str(&delta);
+        let trimmed = self.held.trim_start();
+        if trimmed.starts_with("<tool") {
+            self.decided = true;
+            self.is_tool = true;
+        } else if trimmed.len() >= 5 || !"<tool".starts_with(trimmed) {
+            self.decided = true;
+            let held = std::mem::take(&mut self.held);
+            let _ = self.channel.send(held);
+        }
+    }
+
+    fn finish(&mut self) {
+        if self.guard && !self.decided {
+            self.decided = true;
+            let held = std::mem::take(&mut self.held);
+            if !held.is_empty() {
+                let _ = self.channel.send(held);
+            }
+        }
+    }
+}
+
+fn parse_tool_call(text: &str) -> Option<(String, Value)> {
+    let start = text.find("<tool>")? + 6;
+    let end = text[start..].find("</tool>").map(|i| start + i).unwrap_or(text.len());
+    let value: Value = serde_json::from_str(text[start..end].trim()).ok()?;
+    Some((value["name"].as_str()?.to_string(), value["args"].clone()))
+}
+
+#[tauri::command]
+async fn send_chat_message(
+    messages: Vec<ChatMessage>,
+    personality: String,
+    provider: String,
+    model: String,
+    full_privacy: bool,
+    screen_image: Option<String>,
+    web_tools: bool,
+    on_delta: Channel<String>,
+    on_tool: Channel<String>,
+) -> Result<String, String> {
+    let tools_on = web_tools && !full_privacy;
+    if !tools_on {
+        let mut sink = Sink::new(&on_delta, false);
+        return chat_round(&messages, &personality, &provider, &model, full_privacy, screen_image, "", &mut sink).await;
+    }
+
+    let extra = tools_system_prompt();
+    let mut convo = messages;
+    for round in 0..4 {
+        let last = round == 3;
+        let mut sink = Sink::new(&on_delta, !last);
+        let extra_now = if last { "" } else { extra.as_str() };
+        let reply = chat_round(&convo, &personality, &provider, &model, full_privacy, screen_image.clone(), extra_now, &mut sink).await?;
+        let call = if last { None } else { parse_tool_call(&reply) };
+        let Some((name, args)) = call else {
+            return Ok(reply);
+        };
+        let label = match name.as_str() {
+            "web_search" => format!("Searching the web for \"{}\"", args["query"].as_str().unwrap_or("")),
+            "fetch_url" => format!("Reading {}", args["url"].as_str().unwrap_or("a page")),
+            _ => format!("Using {name}"),
+        };
+        let _ = on_tool.send(label);
+        let result = run_tool(name.clone(), args, full_privacy)
+            .await
+            .unwrap_or_else(|error| format!("Tool error: {error}"));
+        let result: String = result.chars().take(4_000).collect();
+        convo.push(ChatMessage { role: "assistant".into(), content: reply, image: None });
+        convo.push(ChatMessage {
+            role: "user".into(),
+            content: format!("Tool result for {name}:\n{result}\n\nNow answer my original question using this."),
+            image: None,
+        });
+    }
+    Err("The tool loop ended unexpectedly.".to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -802,7 +915,8 @@ pub fn run() {
             get_local_ai_status,
             synthesize_speech,
             transcribe_audio,
-            send_chat_message
+            send_chat_message,
+            run_tool
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -813,4 +927,216 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Vela");
+}
+
+// ---- Tools: a small registry the model can call. Skills/marketplace entries can add to this later. ----
+
+struct ToolSpec {
+    name: &'static str,
+    description: &'static str,
+    args: &'static str,
+}
+
+const TOOLS: &[ToolSpec] = &[
+    ToolSpec { name: "web_search", description: "Search the web for current or time-sensitive information (news, prices, scores, releases, weather).", args: "{\"query\": string}" },
+    ToolSpec { name: "fetch_url", description: "Read the text content of a web page, e.g. a result from web_search.", args: "{\"url\": string}" },
+    ToolSpec { name: "get_datetime", description: "Get the current date and time (UTC).", args: "{}" },
+];
+
+fn tools_system_prompt() -> String {
+    let mut prompt = String::from(
+        "\n\nYou can use tools for live information. To call one, reply with ONLY a single line like \
+<tool>{\"name\":\"web_search\",\"args\":{\"query\":\"...\"}}</tool> and nothing else; the result will be sent back to you. \
+Use tools for anything time-sensitive or that you're unsure is current; otherwise answer directly. \
+After results arrive, answer naturally and cite sources by site name with their URL. Available tools:\n",
+    );
+    for tool in TOOLS {
+        prompt.push_str(&format!("- {} {}: {}\n", tool.name, tool.args, tool.description));
+    }
+    prompt
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Some(value) = input.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(value);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn decode_entities(text: &str) -> String {
+    text.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+}
+
+fn strip_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() / 2);
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                out.push(' ');
+            }
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    decode_entities(&out).split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn remove_blocks(html: &str, tag: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let (open, close) = (format!("<{tag}"), format!("</{tag}>"));
+    let mut out = String::new();
+    let mut pos = 0;
+    while let Some(start) = lower[pos..].find(&open) {
+        out.push_str(&html[pos..pos + start]);
+        match lower[pos + start..].find(&close) {
+            Some(end) => pos += start + end + close.len(),
+            None => {
+                pos = html.len();
+                break;
+            }
+        }
+    }
+    out.push_str(&html[pos..]);
+    out
+}
+
+fn is_blocked_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".local") || host.ends_with(".internal") {
+        return true;
+    }
+    if let Ok(ip) = host.trim_matches(|c| c == '[' || c == ']').parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+            }
+            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+        };
+    }
+    false
+}
+
+async fn tool_web_search(query: &str) -> Result<String, String> {
+    if query.trim().is_empty() || query.len() > 300 {
+        return Err("Search query must be 1-300 characters.".to_string());
+    }
+    let body = http_client()
+        .post("https://html.duckduckgo.com/html/")
+        .header("User-Agent", "Mozilla/5.0 (compatible; Vela/0.1)")
+        .form(&[("q", query)])
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|error| format!("Search failed: {error}"))?
+        .text()
+        .await
+        .map_err(|error| format!("Search failed: {error}"))?;
+
+    let mut results = Vec::new();
+    for chunk in body.split("class=\"result__a\"").skip(1) {
+        if results.len() >= 6 {
+            break;
+        }
+        let href = chunk.split("href=\"").nth(1).and_then(|s| s.split('"').next()).unwrap_or("");
+        let url = match href.split("uddg=").nth(1) {
+            Some(encoded) => percent_decode(encoded.split('&').next().unwrap_or("")),
+            None => href.to_string(),
+        };
+        let title = chunk.split_once('>').map(|(_, rest)| strip_tags(rest.split("</a>").next().unwrap_or(""))).unwrap_or_default();
+        let snippet = chunk
+            .split("class=\"result__snippet\"")
+            .nth(1)
+            .and_then(|s| s.split_once('>'))
+            .map(|(_, rest)| strip_tags(rest.split("</a>").next().unwrap_or("")))
+            .unwrap_or_default();
+        if url.starts_with("http") && !title.is_empty() {
+            results.push(format!("{}. {}\n{}\n{}", results.len() + 1, title, url, snippet));
+        }
+    }
+    if results.is_empty() {
+        return Ok("No results found.".to_string());
+    }
+    Ok(results.join("\n\n"))
+}
+
+async fn tool_fetch_url(url: &str) -> Result<String, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| "Invalid URL.".to_string())?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("Only http and https URLs can be fetched.".to_string());
+    }
+    if parsed.host_str().map_or(true, is_blocked_host) {
+        return Err("That address isn't allowed.".to_string());
+    }
+    let response = http_client()
+        .get(parsed)
+        .header("User-Agent", "Mozilla/5.0 (compatible; Vela/0.1)")
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|error| format!("Couldn't fetch the page: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("The page returned {}.", response.status()));
+    }
+    let html = response
+        .text()
+        .await
+        .map_err(|error| format!("Couldn't read the page: {error}"))?;
+    let html = remove_blocks(&remove_blocks(&remove_blocks(&html, "script"), "style"), "noscript");
+    let text = strip_tags(&html);
+    Ok(text.chars().take(5_000).collect())
+}
+
+fn utc_now_string() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    if month <= 2 {
+        year += 1;
+    }
+    format!("{year:04}-{month:02}-{day:02} {:02}:{:02} UTC", rem / 3600, rem % 3600 / 60)
+}
+
+#[tauri::command]
+async fn run_tool(name: String, args: Value, full_privacy: bool) -> Result<String, String> {
+    if full_privacy {
+        return Err("Full Privacy Mode blocks internet tools.".to_string());
+    }
+    match name.as_str() {
+        "web_search" => tool_web_search(args["query"].as_str().unwrap_or("")).await,
+        "fetch_url" => tool_fetch_url(args["url"].as_str().unwrap_or("")).await,
+        "get_datetime" => Ok(utc_now_string()),
+        _ => Err(format!("Unknown tool '{name}'.")),
+    }
 }

@@ -145,6 +145,10 @@ function App() {
   const [isTranscribing, setIsTranscribing] =
     useState(false);
 
+  const [webTools, setWebTools] = useState(
+    () => window.localStorage.getItem("vela.webTools") !== "false",
+  );
+  const [toolStatus, setToolStatus] = useState("");
   const [chatError, setChatError] =
     useState("");
 
@@ -403,7 +407,9 @@ function App() {
       model: localModel,
       fullPrivacy,
       screenImage: null,
+      webTools: false,
       onDelta: sink,
+      onTool: new Channel<string>(),
     })
       .then((reply) => {
         const lines = reply
@@ -1241,7 +1247,10 @@ function App() {
       const stream = new Channel<string>();
       let streamed = "";
       setMessages([...nextMessages, { role: "assistant", content: "" }]);
+      const toolChannel = new Channel<string>();
+      toolChannel.onmessage = (label) => setToolStatus(label);
       stream.onmessage = (delta) => {
+        setToolStatus("");
         streamed += delta;
         const snapshot = streamed;
         setMessages([...nextMessages, { role: "assistant", content: snapshot }]);
@@ -1253,7 +1262,9 @@ function App() {
         model: localModel,
         fullPrivacy,
         screenImage: screenImage ?? null,
+        webTools,
         onDelta: stream,
+        onTool: toolChannel,
       });
       setMessages([
         ...nextMessages,
@@ -1271,6 +1282,7 @@ function App() {
       );
     } finally {
       setIsSending(false);
+      setToolStatus("");
     }
   };
 
@@ -1620,6 +1632,13 @@ function App() {
                     }} />
                     <span><strong>Speak replies aloud</strong><small>Uses system voices. Full Privacy Mode only uses voices marked local by your system. Use Stop speaking to silence a reply.</small></span>
                   </label>
+                  <label className="privacy-toggle">
+                    <input type="checkbox" checked={webTools && !fullPrivacy} disabled={fullPrivacy} onChange={(event) => {
+                      setWebTools(event.target.checked);
+                      window.localStorage.setItem("vela.webTools", String(event.target.checked));
+                    }} />
+                    <span><strong>Web access</strong><small>{fullPrivacy ? "Off in Full Privacy Mode - nothing leaves your device." : "Lets Vela search the web and read pages for current information."}</small></span>
+                  </label>
                   <button type="button" className="remove-key-button" onClick={() => window.speechSynthesis?.cancel()}>Stop speaking</button>
                 </div>
                 {credentialStatus && (
@@ -1682,7 +1701,7 @@ function App() {
                       <div className="message assistant">
                         <span className="message-avatar">V</span>
                         <div className="thinking-copy">
-                          <span /><span /><span /> finding the words…
+                          <span /><span /><span /> {toolStatus || "finding the words…"}
                         </div>
                       </div>
                     )}
