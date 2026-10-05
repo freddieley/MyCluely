@@ -870,8 +870,8 @@ async fn send_chat_message(
 
     let extra = tools_system_prompt();
     let mut convo = messages;
-    for round in 0..4 {
-        let last = round == 3;
+    for round in 0..8 {
+        let last = round == 7;
         let mut sink = Sink::new(&on_delta, !last);
         let extra_now = if last { "" } else { extra.as_str() };
         let reply = chat_round(&convo, &personality, &provider, &model, full_privacy, screen_image.clone(), extra_now, &mut sink).await?;
@@ -882,13 +882,14 @@ async fn send_chat_message(
         let label = match name.as_str() {
             "web_search" => format!("Searching the web for \"{}\"", args["query"].as_str().unwrap_or("")),
             "fetch_url" => format!("Reading {}", args["url"].as_str().unwrap_or("a page")),
+            "browse_page" => format!("Browsing {}", args["url"].as_str().unwrap_or("a page")),
             _ => format!("Using {name}"),
         };
         let _ = on_tool.send(label);
         let result = run_tool(name.clone(), args, full_privacy)
             .await
             .unwrap_or_else(|error| format!("Tool error: {error}"));
-        let result: String = result.chars().take(4_000).collect();
+        let result: String = result.chars().take(9_000).collect();
         convo.push(ChatMessage { role: "assistant".into(), content: reply, image: None });
         convo.push(ChatMessage {
             role: "user".into(),
@@ -940,6 +941,7 @@ struct ToolSpec {
 const TOOLS: &[ToolSpec] = &[
     ToolSpec { name: "web_search", description: "Search the web for current or time-sensitive information (news, prices, scores, releases, weather).", args: "{\"query\": string}" },
     ToolSpec { name: "fetch_url", description: "Read the text content of a web page, e.g. a result from web_search.", args: "{\"url\": string}" },
+    ToolSpec { name: "browse_page", description: "Open a page in a real headless browser (runs JavaScript, so it works on dynamic sites like weather, sports, prices). Returns the visible text plus links you can open next. Prefer this over fetch_url, and browse several pages to cross-check; never tell the user to visit a link themselves.", args: "{\"url\": string}" },
     ToolSpec { name: "get_datetime", description: "Get the current date and time (UTC).", args: "{}" },
 ];
 
@@ -948,6 +950,7 @@ fn tools_system_prompt() -> String {
         "\n\nYou can use tools for live information. To call one, reply with ONLY a single line like \
 <tool>{\"name\":\"web_search\",\"args\":{\"query\":\"...\"}}</tool> and nothing else; the result will be sent back to you. \
 Use tools for anything time-sensitive or that you're unsure is current; otherwise answer directly. \
+You can browse like a person: search, then open the best results with browse_page, follow links, and keep going until you have the answer. Never tell the user to visit a link themselves. \
 After results arrive, answer naturally and cite sources by site name with their URL. Available tools:\n",
     );
     for tool in TOOLS {
@@ -1106,6 +1109,114 @@ async fn tool_fetch_url(url: &str) -> Result<String, String> {
     Ok(text.chars().take(5_000).collect())
 }
 
+fn find_browser() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for var in ["ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"] {
+        if let Ok(base) = std::env::var(var) {
+            let base = PathBuf::from(base);
+            candidates.push(base.join("Microsoft\\Edge\\Application\\msedge.exe"));
+            candidates.push(base.join("Google\\Chrome\\Application\\chrome.exe"));
+            candidates.push(base.join("BraveSoftware\\Brave-Browser\\Application\\brave.exe"));
+        }
+    }
+    for path in ["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"] {
+        candidates.push(PathBuf::from(path));
+    }
+    candidates.into_iter().find(|p| p.exists())
+}
+
+fn extract_links(html: &str, base: &reqwest::Url) -> Vec<String> {
+    let mut links: Vec<String> = Vec::new();
+    for chunk in html.split("<a ").skip(1) {
+        if links.len() >= 25 {
+            break;
+        }
+        let Some(href) = chunk.split("href=\"").nth(1).and_then(|s| s.split('"').next()) else { continue };
+        let Some((_, rest)) = chunk.split_once('>') else { continue };
+        let label = strip_tags(rest.split("</a>").next().unwrap_or(""));
+        let Ok(url) = base.join(&decode_entities(href)) else { continue };
+        if (url.scheme() == "http" || url.scheme() == "https") && label.len() > 3 {
+            let entry = format!("- {} ({})", label.chars().take(80).collect::<String>(), url);
+            if !links.contains(&entry) {
+                links.push(entry);
+            }
+        }
+    }
+    links
+}
+
+async fn tool_browse_page(url: &str) -> Result<String, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| "Invalid URL.".to_string())?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("Only http and https URLs can be browsed.".to_string());
+    }
+    if parsed.host_str().map_or(true, is_blocked_host) {
+        return Err("That address isn't allowed.".to_string());
+    }
+    let Some(browser) = find_browser() else {
+        // No installed Chromium-based browser: fall back to a plain fetch.
+        return tool_fetch_url(url).await;
+    };
+    let profile = std::env::temp_dir().join(format!("vela-browse-{}", std::process::id()));
+    let target = parsed.to_string();
+    let output = tauri::async_runtime::spawn_blocking(move || {
+        let mut command = Command::new(browser);
+        command
+            .arg("--headless=new")
+            .arg("--disable-gpu")
+            .arg("--no-first-run")
+            .arg("--disable-extensions")
+            .arg("--mute-audio")
+            .arg("--window-size=1280,2000")
+            .arg("--virtual-time-budget=10000")
+            .arg("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+            .arg(format!("--user-data-dir={}", profile.display()))
+            .arg("--dump-dom")
+            .arg(&target)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
+        let child = command.stdout(std::process::Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+        let id = child.id();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(child.wait_with_output());
+        });
+        let result = match rx.recv_timeout(Duration::from_secs(40)) {
+            Ok(out) => out.map_err(|e| e.to_string()),
+            Err(_) => {
+                #[cfg(windows)]
+                let _ = Command::new("taskkill").args(["/PID", &id.to_string(), "/T", "/F"]).output();
+                #[cfg(not(windows))]
+                let _ = Command::new("kill").args(["-9", &id.to_string()]).output();
+                Err("The page took too long to load.".to_string())
+            }
+        };
+        let _ = fs::remove_dir_all(&profile);
+        result
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let html = String::from_utf8_lossy(&output.stdout).into_owned();
+    if html.trim().is_empty() {
+        return tool_fetch_url(url).await;
+    }
+    let links = extract_links(&html, &parsed);
+    let cleaned = remove_blocks(&remove_blocks(&remove_blocks(&remove_blocks(&html, "script"), "style"), "noscript"), "svg");
+    let text: String = strip_tags(&cleaned).chars().take(6_500).collect();
+    let mut out = format!("Page text:\n{text}");
+    if !links.is_empty() {
+        out.push_str("\n\nLinks:\n");
+        out.push_str(&links.join("\n"));
+    }
+    Ok(out)
+}
+
 fn utc_now_string() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1134,6 +1245,7 @@ async fn run_tool(name: String, args: Value, full_privacy: bool) -> Result<Strin
     match name.as_str() {
         "web_search" => tool_web_search(args["query"].as_str().unwrap_or("")).await,
         "fetch_url" => tool_fetch_url(args["url"].as_str().unwrap_or("")).await,
+        "browse_page" => tool_browse_page(args["url"].as_str().unwrap_or("")).await,
         "get_datetime" => Ok(utc_now_string()),
         _ => Err(format!("Unknown tool '{name}'.")),
     }

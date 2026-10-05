@@ -1637,7 +1637,7 @@ function App() {
                       setWebTools(event.target.checked);
                       window.localStorage.setItem("vela.webTools", String(event.target.checked));
                     }} />
-                    <span><strong>Web access</strong><small>{fullPrivacy ? "Allowed in Full Privacy Mode. Only search queries and page requests leave your device; the model stays local." : "Lets Vela search the web and read pages for current information."}</small></span>
+                    <span><strong>Web access</strong><small>{fullPrivacy ? "Allowed in Full Privacy Mode. Only search queries and page requests leave your device; the model stays local." : "Lets Vela search the web and browse pages in a real headless browser, following links like a person."}</small></span>
                   </label>
                   <button type="button" className="remove-key-button" onClick={() => window.speechSynthesis?.cancel()}>Stop speaking</button>
                 </div>
