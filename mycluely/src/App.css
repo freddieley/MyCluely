@@ -1530,3 +1530,5 @@ button {
   width: 0;
   height: 0;
 }
+
+.meeting-transcript > div > span { display: inline-flex; gap: 6px; }

@@ -246,7 +246,7 @@ function App() {
 
   const transcribeVoiceNote = (voiceNote: Blob) => {
     setIsTranscribing(true);
-    setMicrophoneStatus("Transcribing…");
+    setMicrophoneStatus("Transcribingâ€¦");
 
     const transcription = voiceQueueRef.current.then(async () => {
       const activeProvider = providerRef.current;
@@ -363,7 +363,7 @@ function App() {
       .then((reply) => {
         const lines = reply
           .split("\n")
-          .map((line) => line.replace(/^[\s\-*\d.)"“]+|["”\s]+$/g, "").trim())
+          .map((line) => line.replace(/^[\s\-*\d.)"â€œ]+|["â€\s]+$/g, "").trim())
           .filter((line) => line.length > 3 && line.length <= 60)
           .slice(0, 3);
         if (!cancelled && lines.length === 3) setSuggestions(lines);
@@ -506,12 +506,12 @@ function App() {
           recordedChunksRef.current = [];
           recorder.start();
           recorderRef.current = recorder;
-          setMicrophoneStatus("Recording…");
+          setMicrophoneStatus("Recordingâ€¦");
           recordingTimerRef.current = window.setTimeout(() => {
             if (recorder.state === "recording") {
               recorder.stop();
             }
-          }, 30_000);
+          }, 4_000);
         }
       };
       recorder.start();
@@ -520,14 +520,14 @@ function App() {
       isListeningRef.current = true;
 
       setMicrophoneStatus(
-        "Recording…",
+        "Recordingâ€¦",
       );
       voiceTranscriptRef.current = "";
       recordingTimerRef.current = window.setTimeout(() => {
         if (recorder.state === "recording") {
           recorder.stop();
         }
-      }, 30_000);
+      }, 4_000);
 
       const updateMicrophone = () => {
         if (!isListeningRef.current) {
@@ -557,7 +557,7 @@ function App() {
 
         /*
          * Convert the microphone's RMS
-         * amplitude into a useful 0–1
+         * amplitude into a useful 0â€“1
          * visual level.
          */
         const amplified =
@@ -1012,7 +1012,7 @@ function App() {
     meetingRecorderRef.current = recorder;
     meetingSegmentTimerRef.current = window.setTimeout(() => {
       if (recorder.state === "recording") recorder.stop();
-    }, 30_000);
+    }, 4_000);
   };
 
   startMeetingSegmentRef.current = startMeetingSegment;
@@ -1455,14 +1455,14 @@ function App() {
                         window.localStorage.setItem("vela.model", event.target.value);
                       }} disabled={!localAiStatus?.models.length}>
                         {localAiStatus?.models.length
-                          ? localAiStatus.models.map((model) => <option key={model.name} value={model.name}>{model.name}{model.vision ? " · vision" : ""}</option>)
+                          ? localAiStatus.models.map((model) => <option key={model.name} value={model.name}>{model.name}{model.vision ? " Â· vision" : ""}</option>)
                           : <option value="">No Ollama models found</option>}
                       </select>
                       <button type="button" className="save-key-button" onClick={() => void refreshLocalModels()}>Refresh</button>
                     </div>
                     <p className="provider-copy">
                       {localAiStatus?.available
-                        ? `${localAiStatus.totalMemoryGb} GB RAM · ${localAiStatus.cpuThreads} CPU threads · Suggested: ${localAiStatus.recommendedModel}. Actual speed depends on your hardware.`
+                        ? `${localAiStatus.totalMemoryGb} GB RAM Â· ${localAiStatus.cpuThreads} CPU threads Â· Suggested: ${localAiStatus.recommendedModel}. Actual speed depends on your hardware.`
                         : "Install and start Ollama, then pull a model such as qwen3:4b. Vela will never silently fall back to the cloud."}
                     </p>
                   </div>
@@ -1527,7 +1527,7 @@ function App() {
                 )}
               </div>
               <button type="button" className="back-to-chat" onClick={() => void openPanel("chat")}>
-                Back to chat <span aria-hidden="true">→</span>
+                Back to chat <span aria-hidden="true">â†’</span>
               </button>
             </div>
           ) : (
@@ -1537,8 +1537,8 @@ function App() {
                   <div className="welcome-card">
                     <div className="welcome-orb"><span /></div>
                     <div className="eyebrow">YOUR {personalities[personality].label.toUpperCase()}</div>
-                    <h1>Hey, I’m in your corner.</h1>
-                    <p>Bring me the awkward bit, the big question, or the blank page. We’ll figure it out together.</p>
+                    <h1>Hey, Iâ€™m in your corner.</h1>
+                    <p>Bring me the awkward bit, the big question, or the blank page. Weâ€™ll figure it out together.</p>
                     <div className="suggestion-list">
                       {suggestions.map((suggestion) => (
                         <button
@@ -1547,7 +1547,7 @@ function App() {
                           className="suggestion-chip"
                           onClick={() => void sendMessage(suggestion)}
                         >
-                          {suggestion}<span aria-hidden="true">↗</span>
+                          {suggestion}<span aria-hidden="true">â†—</span>
                         </button>
                       ))}
                     </div>
@@ -1581,7 +1581,7 @@ function App() {
                       <div className="message assistant">
                         <span className="message-avatar">V</span>
                         <div className="thinking-copy">
-                          <span /><span /><span /> finding the words…
+                          <span /><span /><span /> finding the wordsâ€¦
                         </div>
                       </div>
                     )}
@@ -1604,10 +1604,10 @@ function App() {
                     {meetingCapture ? "Stop meeting capture" : "Transcribe meeting"}
                   </button>
                 </div>
-                {meetingCapture && <p className="capture-notice" role="status">Meeting audio is being transcribed in 30-second segments. Nothing is sent until it is processed by the selected provider.</p>}
+                {meetingCapture && <p className="capture-notice" role="status">Meeting audio is being transcribed live in short 4-second chunks. Nothing is sent until it is processed by the selected provider.</p>}
                 {meetingTranscript && (
                   <div className="meeting-transcript">
-                    <div><strong>Meeting notes</strong><button type="button" onClick={() => setDraft((value) => `${value}${value ? "\n\n" : ""}${meetingTranscript}`)}>Add to message</button></div>
+                    <div><strong>Meeting notes</strong><span><button type="button" onClick={() => setDraft((value) => `${value}${value ? "\n\n" : ""}${meetingTranscript}`)}>Add to message</button><button type="button" onClick={() => { meetingTranscriptRef.current = ""; setMeetingTranscript(""); }}>Delete</button></span></div>
                     <p>{meetingTranscript}</p>
                   </div>
                 )}
@@ -1630,7 +1630,7 @@ function App() {
                         void sendMessage(draft);
                       }
                     }}
-                    placeholder={screenSharing ? "Ask about anything on your screen…" : "Tell me what’s on your mind…"}
+                    placeholder={screenSharing ? "Ask about anything on your screenâ€¦" : "Tell me whatâ€™s on your mindâ€¦"}
                     aria-label="Message Vela"
                     rows={1}
                     maxLength={8000}
@@ -1647,7 +1647,7 @@ function App() {
                   </button>
                 </div>
                 <div className="composer-footer">
-                  <span>{fullPrivacy ? "Full Privacy Mode · local model only" : provider === "local" ? "On-device · Ollama" : "Cloud · OpenAI"}{screenSharing ? " · Screen attached when you send" : ""}</span>
+                  <span>{fullPrivacy ? "Full Privacy Mode Â· local model only" : provider === "local" ? "On-device Â· Ollama" : "Cloud Â· OpenAI"}{screenSharing ? " Â· Screen attached when you send" : ""}</span>
                   {messages.length > 0 && (
                     <button
                       type="button"
