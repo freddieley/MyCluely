@@ -381,6 +381,7 @@ function App() {
   }, [alwaysOnTop]);
 
   const [suggestions, setSuggestions] = useState<string[]>(() => pickFallbackSuggestions());
+  const [welcome, setWelcome] = useState<{ title: string; body: string } | null>(null);
   const noMessages = messages.length === 0;
   const providerReady =
     provider === "openai" ? apiKeyPresent : Boolean(localModel);
@@ -388,6 +389,7 @@ function App() {
     if (!isTauri() || !expanded || !noMessages || !providerReady) return;
     let cancelled = false;
     setSuggestions(pickFallbackSuggestions());
+    setWelcome(null);
     const sink = new Channel<string>();
     sink.onmessage = () => {};
     const seed = Math.random().toString(36).slice(2, 8);
@@ -396,10 +398,10 @@ function App() {
         {
           role: "user",
           content:
-            `Write 3 fresh, specific, varied conversation starters a user might tap to begin chatting with you (variety seed: ${seed}). ` +
+            `Write a welcome screen for the user (variety seed: ${seed}). Line 1: a short punchy greeting headline in your personality, under 8 words. Line 2: one warm sentence under 20 words inviting them to start. Lines 3-5: 3 fresh, specific, varied conversation starters a user might tap to begin chatting with you. ` +
             "Mix topics: work, writing, decisions, social situations, learning, ideas. " +
-            "Each is under 7 words, written as something the user would say to you. " +
-            "Reply with exactly 3 lines, no numbering, bullets, quotes or extra text.",
+            "Each starter is under 7 words, written as something the user would say to you. " +
+            "Reply with exactly 5 lines, no numbering, bullets, quotes, labels or extra text.",
         },
       ],
       personality,
@@ -415,9 +417,11 @@ function App() {
         const lines = reply
           .split("\n")
           .map((line) => line.replace(/^[\s\-*\d.)"“]+|["”\s]+$/g, "").trim())
-          .filter((line) => line.length > 3 && line.length <= 60)
-          .slice(0, 3);
-        if (!cancelled && lines.length === 3) setSuggestions(lines);
+          .filter((line) => line.length > 3 && line.length <= 160);
+        if (!cancelled && lines.length === 5) {
+          setWelcome({ title: lines[0], body: lines[1] });
+          setSuggestions(lines.slice(2).filter((line) => line.length <= 60));
+        }
       })
       .catch((error: unknown) => {
         console.error("Couldn't generate suggestions:", error);
@@ -1657,8 +1661,8 @@ function App() {
                   <div className="welcome-card">
                     <div className="welcome-orb"><span /></div>
                     <div className="eyebrow">YOUR {personalities[personality].label.toUpperCase()}</div>
-                    <h1>Hey, I’m in your corner.</h1>
-                    <p>Bring me the awkward bit, the big question, or the blank page. We’ll figure it out together.</p>
+                    <h1>{welcome?.title ?? "Hey, I’m in your corner."}</h1>
+                    <p>{welcome?.body ?? "Bring me the awkward bit, the big question, or the blank page. We’ll figure it out together."}</p>
                     <div className="suggestion-list">
                       {suggestions.map((suggestion) => (
                         <button
