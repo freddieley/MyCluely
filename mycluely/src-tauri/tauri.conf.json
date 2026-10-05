@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "mycluely",
+  "productName": "MyCluely",
   "version": "0.1.0",
-  "identifier": "com.fredd.mycluely",
+  "identifier": "com.freddieley.mycluely",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,9 +12,18 @@
   "app": {
     "windows": [
       {
-        "title": "mycluely",
-        "width": 800,
-        "height": 600
+        "label": "main",
+        "title": "MyCluely",
+        "width": 560,
+        "height": 84,
+        "resizable": false,
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "center": true,
+        "visible": true,
+        "focus": true
       }
     ],
     "security": {

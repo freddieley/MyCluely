@@ -1,49 +1,102 @@
 import { useState } from "react";
-import reactLogo from "./assets/react.svg";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+  const [status, setStatus] = useState("Ready");
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+  async function closeWindow() {
+    try {
+      await invoke("close_window");
+    } catch (error) {
+      console.error("Failed to close window:", error);
+    }
+  }
+
+  async function startDragging() {
+    try {
+      await invoke("start_window_drag");
+    } catch (error) {
+      console.error("Failed to drag window:", error);
+    }
+  }
+
+  function openSettings() {
+    setStatus((current) =>
+      current === "Settings" ? "Ready" : "Settings",
+    );
   }
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+    <main className="app-shell">
+      <section className="copilot-bar">
+        <div
+          className="copilot-drag-region"
+          onMouseDown={(event) => {
+            if (event.button === 0) {
+              startDragging();
+            }
+          }}
+        >
+          <div className="copilot-brand">
+            <div className="brand-mark">
+              <span />
+              <span />
+              <span />
+            </div>
 
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
+            <span className="brand-name">MyCluely</span>
+          </div>
 
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
+          <div className="copilot-status">
+            <span
+              className={`status-dot ${
+                status === "Settings"
+                  ? "status-dot-settings"
+                  : ""
+              }`}
+            />
+
+            <span>{status}</span>
+          </div>
+        </div>
+
+        <div
+          className="copilot-actions"
+          onMouseDown={(event) => {
+            event.stopPropagation();
+          }}
+        >
+          <button
+            className="icon-button"
+            type="button"
+            aria-label="Settings"
+            onClick={openSettings}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.8 1.8-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V22h-2.54v-.1a1.7 1.7 0 0 0-1.03-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06-1.8-1.8.06-.06A1.7 1.7 0 0 0 8.12 17a1.7 1.7 0 0 0-1.56-1.03H6.5v-2.54h.06A1.7 1.7 0 0 0 8.12 12.4a1.7 1.7 0 0 0-.34-1.88l-.06-.06 1.8-1.8.06.06a1.7 1.7 0 0 0 1.88.34 1.7 1.7 0 0 0 1.03-1.56V5h2.54v.06a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06 1.8 1.8-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.56 1.03H21v2.54h-.06A1.7 1.7 0 0 0 19.4 15Z" />
+            </svg>
+          </button>
+
+          <button
+            className="icon-button close-button"
+            type="button"
+            aria-label="Close"
+            onClick={closeWindow}
+          >
+            <span />
+            <span />
+          </button>
+        </div>
+      </section>
     </main>
   );
 }
