@@ -200,6 +200,7 @@ function App() {
     const source = offlineContext.createBufferSource();
     source.buffer = decoded;
     source.connect(offlineContext.destination);
+    source.start(0);
     const mono = (await offlineContext.startRendering()).getChannelData(0);
     const wav = new ArrayBuffer(44 + mono.length * 2);
     const header = new DataView(wav);
