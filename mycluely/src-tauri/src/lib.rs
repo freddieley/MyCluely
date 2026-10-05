@@ -636,9 +636,9 @@ async fn chat_round(
     if messages.iter().any(|message| {
         (message.role != "user" && message.role != "assistant")
             || message.content.trim().is_empty()
-            || message.content.len() > 8_000
+            || message.content.len() > 20_000
     }) {
-        return Err("A message was empty or exceeded the 8,000-character limit.".to_string());
+        return Err("A message was empty or exceeded the 20,000-character limit.".to_string());
     }
 
     let base_prompt = match personality {
@@ -814,35 +814,56 @@ impl<'a> Sink<'a> {
     }
 
     fn push(&mut self, delta: String) {
-        if self.decided {
-            if !self.is_tool {
-                let _ = self.channel.send(delta);
-            }
+        if !self.guard {
+            let _ = self.channel.send(delta);
+            return;
+        }
+        if self.is_tool {
             return;
         }
         self.held.push_str(&delta);
-        let trimmed = self.held.trim_start();
-        if trimmed.starts_with("<tool") {
-            self.decided = true;
+        if let Some(i) = self.held.find("<tool") {
+            let before: String = self.held[..i].to_string();
+            self.held.clear();
             self.is_tool = true;
-        } else if trimmed.len() >= 5 || !"<tool".starts_with(trimmed) {
-            self.decided = true;
-            let held = std::mem::take(&mut self.held);
-            let _ = self.channel.send(held);
+            if !before.trim().is_empty() {
+                let _ = self.channel.send(before);
+            }
+            return;
+        }
+        // Keep back any trailing fragment that could become "<tool".
+        let mut keep = 0;
+        for n in (1..=4.min(self.held.len())).rev() {
+            if self.held.is_char_boundary(self.held.len() - n) && "<tool".starts_with(&self.held[self.held.len() - n..]) {
+                keep = n;
+                break;
+            }
+        }
+        let cut = self.held.len() - keep;
+        let out: String = self.held[..cut].to_string();
+        self.held = self.held[cut..].to_string();
+        if !out.is_empty() {
+            let _ = self.channel.send(out);
         }
     }
 
     fn finish(&mut self) {
-        if self.guard && !self.decided {
-            self.decided = true;
+        if self.guard && !self.is_tool {
             let held = std::mem::take(&mut self.held);
             if !held.is_empty() {
                 let _ = self.channel.send(held);
             }
         }
+        self.decided = true;
     }
 }
 
+fn strip_tool(text: &str) -> String {
+    match text.find("<tool") {
+        Some(i) => text[..i].trim_end().to_string(),
+        None => text.to_string(),
+    }
+}
 fn parse_tool_call(text: &str) -> Option<(String, Value)> {
     let start = text.find("<tool>")? + 6;
     let end = text[start..].find("</tool>").map(|i| start + i).unwrap_or(text.len());
@@ -877,7 +898,7 @@ async fn send_chat_message(
         let reply = chat_round(&convo, &personality, &provider, &model, full_privacy, screen_image.clone(), extra_now, &mut sink).await?;
         let call = if last { None } else { parse_tool_call(&reply) };
         let Some((name, args)) = call else {
-            return Ok(reply);
+            return Ok(strip_tool(&reply));
         };
         let label = match name.as_str() {
             "web_search" => format!("Searching the web for \"{}\"", args["query"].as_str().unwrap_or("")),
