@@ -1,9 +1,25 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
+type CopilotState =
+  | "idle"
+  | "listening"
+  | "thinking"
+  | "responding";
+
+const stateLabels: Record<CopilotState, string> = {
+  idle: "Ready",
+  listening: "Listening",
+  thinking: "Thinking",
+  responding: "Responding",
+};
+
 function App() {
-  const [status, setStatus] = useState("Ready");
+  const [copilotState, setCopilotState] =
+    useState<CopilotState>("idle");
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   async function closeWindow() {
     try {
@@ -21,15 +37,61 @@ function App() {
     }
   }
 
-  function openSettings() {
-    setStatus((current) =>
-      current === "Settings" ? "Ready" : "Settings",
-    );
+  function toggleSettings() {
+    setSettingsOpen((current) => !current);
   }
+
+  /*
+   * Temporary development interaction.
+   *
+   * Pressing the number keys lets us preview the different
+   * personality states before the real microphone / AI pipeline
+   * exists.
+   */
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      switch (event.key) {
+        case "1":
+          setCopilotState("idle");
+          break;
+
+        case "2":
+          setCopilotState("listening");
+          break;
+
+        case "3":
+          setCopilotState("thinking");
+          break;
+
+        case "4":
+          setCopilotState("responding");
+          break;
+
+        case "Escape":
+          setSettingsOpen(false);
+          setCopilotState("idle");
+          break;
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
+
+  const currentLabel = settingsOpen
+    ? "Settings"
+    : stateLabels[copilotState];
 
   return (
     <main className="app-shell">
-      <section className="copilot-bar">
+      <section
+        className={`copilot-bar state-${copilotState} ${
+          settingsOpen ? "settings-open" : ""
+        }`}
+      >
         <div
           className="copilot-drag-region"
           onMouseDown={(event) => {
@@ -39,25 +101,48 @@ function App() {
           }}
         >
           <div className="copilot-brand">
-            <div className="brand-mark">
-              <span />
-              <span />
-              <span />
+            <div className="brand-orb">
+              <div className="orb-core" />
+
+              <div className="orb-ring orb-ring-one" />
+              <div className="orb-ring orb-ring-two" />
             </div>
 
-            <span className="brand-name">MyCluely</span>
+            <span className="brand-name">
+              MyCluely
+            </span>
           </div>
 
           <div className="copilot-status">
-            <span
-              className={`status-dot ${
-                status === "Settings"
-                  ? "status-dot-settings"
-                  : ""
-              }`}
-            />
+            <div className="state-indicator">
+              {copilotState === "listening" && (
+                <>
+                  <span />
+                  <span />
+                  <span />
+                  <span />
+                  <span />
+                </>
+              )}
 
-            <span>{status}</span>
+              {copilotState === "thinking" && (
+                <div className="thinking-spinner" />
+              )}
+
+              {copilotState === "responding" && (
+                <div className="responding-pulse" />
+              )}
+
+              {copilotState === "idle" && (
+                <div className="idle-dot" />
+              )}
+
+              {settingsOpen && (
+                <div className="settings-indicator" />
+              )}
+            </div>
+
+            <span>{currentLabel}</span>
           </div>
         </div>
 
@@ -68,10 +153,12 @@ function App() {
           }}
         >
           <button
-            className="icon-button"
+            className={`icon-button ${
+              settingsOpen ? "active" : ""
+            }`}
             type="button"
             aria-label="Settings"
-            onClick={openSettings}
+            onClick={toggleSettings}
           >
             <svg
               viewBox="0 0 24 24"
@@ -82,7 +169,7 @@ function App() {
               strokeLinejoin="round"
             >
               <circle cx="12" cy="12" r="3" />
-              <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.8 1.8-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V22h-2.54v-.1a1.7 1.7 0 0 0-1.03-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06-1.8-1.8.06-.06A1.7 1.7 0 0 0 8.12 17a1.7 1.7 0 0 0-1.56-1.03H6.5v-2.54h.06A1.7 1.7 0 0 0 8.12 12.4a1.7 1.7 0 0 0-.34-1.88l-.06-.06 1.8-1.8.06.06a1.7 1.7 0 0 0 1.88.34 1.7 1.7 0 0 0 1.03-1.56V5h2.54v.06a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06 1.8 1.8-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.56 1.03H21v2.54h-.06A1.7 1.7 0 0 0 19.4 15Z" />
+              <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-1.8 1.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1.5 1.6v.1h-2.5v-.1a1.7 1.7 0 0 0-1.5-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1-1.8-1.8.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1.5H5.3v-2.5h.1a1.7 1.7 0 0 0 1.6-1.5 1.7 1.7 0 0 0-.3-1.9l-.1-.1 1.8-1.8.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1.5-1.6V5.3h2.5v.1a1.7 1.7 0 0 0 1.5 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1 1.8 1.8-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1.5h.1v2.5h-.1a1.7 1.7 0 0 0-1.6 1.5Z" />
             </svg>
           </button>
 
