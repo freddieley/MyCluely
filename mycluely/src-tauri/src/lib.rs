@@ -648,11 +648,10 @@ async fn send_chat_message(
                 .json(&json!({
                     "model": model,
                     "messages": request_messages,
-                    "stream": true,
-                    "keep_alive": "10m",
+                    "stream": true,"think": false,"keep_alive": "10m",
                     "options": {
                         "num_ctx": 4096,
-                        "num_predict": 300,
+                        "num_predict": 600,
                         "temperature": 0.65
                     }
                 }))
