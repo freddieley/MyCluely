@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import {
   register,
   unregister,
@@ -31,11 +31,6 @@ type LocalAiStatus = {
   cpuThreads: number;
   recommendedModel: string;
   error: string | null;
-};
-type LocalSpeechStatus = {
-  configured: boolean;
-  executable: string | null;
-  model: string | null;
 };
 
 const HOTKEY = "CommandOrControl+Shift+Space";
@@ -117,9 +112,6 @@ function App() {
   const [localModel, setLocalModel] = useState(
     () => window.localStorage.getItem("vela.model") ?? "",
   );
-  const [localSpeechStatus, setLocalSpeechStatus] = useState<LocalSpeechStatus | null>(null);
-  const [speechExecutable, setSpeechExecutable] = useState("");
-  const [speechModelPath, setSpeechModelPath] = useState("");
   const [localStatusMessage, setLocalStatusMessage] = useState("");
   const [alwaysOnTop, setAlwaysOnTop] = useState(
     () => window.localStorage.getItem("vela.alwaysOnTop") !== "false",
@@ -162,11 +154,10 @@ function App() {
   const providerRef = useRef(provider);
   const fullPrivacyRef = useRef(fullPrivacy);
   const apiKeyPresentRef = useRef(apiKeyPresent);
-  const localSpeechConfiguredRef = useRef(Boolean(localSpeechStatus?.configured));
+  const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
   providerRef.current = provider;
   fullPrivacyRef.current = fullPrivacy;
   apiKeyPresentRef.current = apiKeyPresent;
-  localSpeechConfiguredRef.current = Boolean(localSpeechStatus?.configured);
 
   const [personality, setPersonality] =
     useState<AssistantPersonality>(() => {
@@ -312,12 +303,6 @@ function App() {
         console.error("Couldn't check local model availability:", error);
         setLocalStatusMessage("Couldn't check whether Ollama is running.");
       });
-    invoke<LocalSpeechStatus>("get_local_speech_status")
-      .then(setLocalSpeechStatus)
-      .catch((error: unknown) => {
-        console.error("Couldn't check local speech setup:", error);
-        setLocalStatusMessage("Couldn't read local transcription settings.");
-      });
   }, []);
 
   useEffect(() => {
@@ -358,13 +343,6 @@ function App() {
     if (providerRef.current === "openai" && !apiKeyPresentRef.current) {
       setChatError("Add your OpenAI API key in Settings before recording a voice note.");
       setMicrophoneStatus("Set up your key");
-      setCopilotState("idle");
-      await openPanel("settings");
-      return;
-    }
-    if (providerRef.current === "local" && !localSpeechConfiguredRef.current) {
-      setChatError("Configure whisper.cpp and a local Whisper model in Settings before recording.");
-      setMicrophoneStatus("Set up local speech");
       setCopilotState("idle");
       await openPanel("settings");
       return;
@@ -885,27 +863,6 @@ function App() {
     }
   };
 
-  const saveLocalSpeech = async () => {
-    if (!speechExecutable.trim() || !speechModelPath.trim()) {
-      setLocalStatusMessage("Choose both the whisper.cpp executable and a Whisper model file.");
-      return;
-    }
-    try {
-      await invoke("save_local_speech_config", {
-        executable: speechExecutable.trim(),
-        model: speechModelPath.trim(),
-      });
-      const status = await invoke<LocalSpeechStatus>("get_local_speech_status");
-      setLocalSpeechStatus(status);
-      setLocalStatusMessage("Local transcription is ready.");
-      setSpeechExecutable("");
-      setSpeechModelPath("");
-    } catch (error) {
-      console.error("Couldn't save local transcription setup:", error);
-      setLocalStatusMessage(typeof error === "string" ? error : "Couldn't save local transcription setup.");
-    }
-  };
-
   const captureScreen = async () => {
     if (!isTauri() || screenSharing) return;
     try {
@@ -998,10 +955,6 @@ function App() {
       setChatError("Add your OpenAI API key in Settings before transcribing a meeting.");
       return;
     }
-    if (provider === "local" && !localSpeechStatus?.configured) {
-      setChatError("Configure whisper.cpp and a local Whisper model in Settings first.");
-      return;
-    }
     try {
       if (screenSharing) stopScreenContext();
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
@@ -1058,21 +1011,24 @@ function App() {
     return jpeg;
   };
 
-  const speakText = (text: string) => {
-    if (!speakReplies || !("speechSynthesis" in window)) return;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    if (fullPrivacyRef.current) {
-      const localVoice = window.speechSynthesis
-        .getVoices()
-        .find((voice) => voice.localService);
-      if (!localVoice) {
-        setChatError("Full Privacy Mode needs an installed local speech voice to speak replies.");
-        return;
-      }
-      utterance.voice = localVoice;
+  const speakText = async (text: string) => {
+    if (!speakReplies) return;
+    try {
+      if (ttsAudioRef.current) ttsAudioRef.current.pause();
+      const wav = await invoke<string>("synthesize_speech", { text });
+      const audio = new Audio(`data:audio/wav;base64,${wav}`);
+      ttsAudioRef.current = audio;
+      await audio.play();
+      return;
+    } catch (error) {
+      console.error("Bundled voice failed:", error);
     }
-    window.speechSynthesis.speak(utterance);
+    if (fullPrivacyRef.current || !("speechSynthesis" in window)) {
+      setChatError("Vela's built-in voice couldn't play this reply.");
+      return;
+    }
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
   };
 
   const sendMessage = async (messageText: string) => {
@@ -1106,6 +1062,14 @@ function App() {
 
     try {
       const screenImage = await snapshotScreen();
+      const stream = new Channel<string>();
+      let streamed = "";
+      setMessages([...nextMessages, { role: "assistant", content: "" }]);
+      stream.onmessage = (delta) => {
+        streamed += delta;
+        const snapshot = streamed;
+        setMessages([...nextMessages, { role: "assistant", content: snapshot }]);
+      };
       const reply = await invoke<string>("send_chat_message", {
         messages: nextMessages.slice(-12),
         personality,
@@ -1113,6 +1077,7 @@ function App() {
         model: localModel,
         fullPrivacy,
         screenImage: screenImage ?? null,
+        onDelta: stream,
       });
       setMessages([
         ...nextMessages,
@@ -1403,7 +1368,7 @@ function App() {
                 </div>
                 <label className="privacy-toggle">
                   <input type="checkbox" checked={fullPrivacy} onChange={(event) => choosePrivacyMode(event.target.checked)} />
-                  <span><strong>Full Privacy Mode</strong><small>Block all cloud chat and transcription. Requires local Ollama and whisper.cpp.</small></span>
+                  <span><strong>Full Privacy Mode</strong><small>Block all cloud chat and transcription. Uses local Ollama plus Vela's built-in speech models.</small></span>
                 </label>
                 {provider === "local" && (
                   <div className="local-model-setup">
@@ -1427,19 +1392,6 @@ function App() {
                   </div>
                 )}
                 {localStatusMessage && <p className="credential-status" role="status">{localStatusMessage}</p>}
-              </div>
-
-              <div className="provider-card">
-                <div className="provider-title">
-                  <div><div className="eyebrow">PRIVATE SPEECH-TO-TEXT</div><h2>Local transcription</h2></div>
-                  <span className={`key-status${localSpeechStatus?.configured ? " connected" : ""}`}><span />{localSpeechStatus?.configured ? "Ready" : "Needs setup"}</span>
-                </div>
-                <p className="provider-copy">For on-device transcription, configure the path to a whisper.cpp executable and a local Whisper model. Voice recordings are split into short segments, transcribed in order, and temporary audio is removed.</p>
-                <div className="local-speech-fields">
-                  <input value={speechExecutable} onChange={(event) => setSpeechExecutable(event.target.value)} placeholder={localSpeechStatus?.executable ?? "Path to whisper-cli.exe"} aria-label="whisper.cpp executable path" />
-                  <input value={speechModelPath} onChange={(event) => setSpeechModelPath(event.target.value)} placeholder={localSpeechStatus?.model ?? "Path to ggml model file"} aria-label="Local Whisper model path" />
-                  <button type="button" className="save-key-button" onClick={() => void saveLocalSpeech()}>Save local setup</button>
-                </div>
               </div>
 
               <div className="provider-card">
@@ -1533,7 +1485,9 @@ function App() {
                         {message.role === "assistant" && <span className="message-author">VELA</span>}
                           <p>{message.content}</p>
                         {message.role === "assistant" && <button type="button" className="speak-message" onClick={() => {
-                          if (window.speechSynthesis?.speaking) window.speechSynthesis.cancel();
+                          const playing = ttsAudioRef.current && !ttsAudioRef.current.paused && !ttsAudioRef.current.ended;
+                          if (playing) ttsAudioRef.current?.pause();
+                          else if (window.speechSynthesis?.speaking) window.speechSynthesis.cancel();
                           else speakText(message.content);
                         }}>Speak / stop</button>}
                         </div>

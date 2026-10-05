@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Downloaded by scripts/fetch-speech-assets.ps1
+src-tauri/resources/speech/

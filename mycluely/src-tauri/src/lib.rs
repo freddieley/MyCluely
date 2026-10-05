@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 use sysinfo::System;
-use tauri::{AppHandle, LogicalSize, Manager, WebviewWindow};
+use tauri::ipc::Channel;
+use tauri::{AppHandle, LogicalSize, Manager, PhysicalPosition, WebviewWindow};
 
 const KEYRING_SERVICE: &str = "com.freddieley.vela";
 const LEGACY_KEYRING_SERVICE: &str = "com.freddieley.mycluely";
@@ -59,17 +60,20 @@ struct ChatMessage {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct OpenAiResponse {
     choices: Option<Vec<OpenAiChoice>>,
     error: Option<OpenAiError>,
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct OpenAiChoice {
     message: OpenAiMessage,
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct OpenAiMessage {
     content: String,
 }
@@ -82,21 +86,6 @@ struct OpenAiError {
 #[derive(Deserialize)]
 struct OpenAiTranscription {
     text: String,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LocalSpeechConfig {
-    executable: PathBuf,
-    model: PathBuf,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LocalSpeechStatus {
-    configured: bool,
-    executable: Option<String>,
-    model: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -124,17 +113,6 @@ struct OllamaTags {
 #[derive(Deserialize)]
 struct OllamaTag {
     name: String,
-}
-
-#[derive(Deserialize)]
-struct OllamaChatResponse {
-    message: Option<OllamaChatMessage>,
-    error: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct OllamaChatMessage {
-    content: String,
 }
 
 fn api_key_entry() -> Result<keyring::Entry, String> {
@@ -212,26 +190,74 @@ async fn model_supports_vision(model: &str) -> Result<bool, String> {
     Ok(vision_capability(&details))
 }
 
-fn local_speech_config_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let config_dir = app
+fn speech_dir(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
+    let relative = format!("resources/speech/{name}");
+    let bundled = app
         .path()
-        .app_config_dir()
+        .resolve(&relative, tauri::path::BaseDirectory::Resource)
         .map_err(|error| error.to_string())?;
-    fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
-    Ok(config_dir.join("local-speech.json"))
-}
-
-fn read_local_speech_config(app: &AppHandle) -> Result<Option<LocalSpeechConfig>, String> {
-    let path = local_speech_config_path(app)?;
-    if !path.exists() {
-        return Ok(None);
+    if bundled.is_dir() {
+        return Ok(bundled);
     }
-    let contents = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    serde_json::from_str(&contents)
-        .map(Some)
-        .map_err(|error| format!("Couldn't read local speech settings: {error}"))
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative);
+    if dev.is_dir() {
+        return Ok(dev);
+    }
+    Err("Vela's bundled speech models are missing. Run scripts/fetch-speech-assets.ps1 and rebuild.".to_string())
 }
 
+#[tauri::command]
+async fn synthesize_speech(app: AppHandle, text: String) -> Result<String, String> {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let text: String = text.chars().take(4000).collect();
+    if text.trim().is_empty() {
+        return Err("Nothing to speak.".to_string());
+    }
+    let dir = speech_dir(&app, "piper")?;
+    let sequence = AUDIO_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let output =
+        std::env::temp_dir().join(format!("vela-tts-{}-{sequence}.wav", std::process::id()));
+    let output_task = output.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut command = Command::new(dir.join("piper.exe"));
+        command
+            .current_dir(&dir)
+            .arg("--model")
+            .arg(dir.join("voice.onnx"))
+            .arg("--output_file")
+            .arg(&output_task)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("Couldn't start the voice engine: {error}"))?;
+        child
+            .stdin
+            .take()
+            .ok_or("Couldn't talk to the voice engine.")?
+            .write_all(text.replace('\n', " ").as_bytes())
+            .map_err(|error| error.to_string())?;
+        let status = child.wait().map_err(|error| error.to_string())?;
+        if !status.success() {
+            return Err("The voice engine failed.".to_string());
+        }
+        fs::read(&output_task).map_err(|error| error.to_string())
+    })
+    .await;
+    let _ = fs::remove_file(&output);
+    let bytes = result.map_err(|error| error.to_string())??;
+    Ok(STANDARD.encode(bytes))
+}
 #[tauri::command]
 fn close_window(window: WebviewWindow) -> Result<(), String> {
     window.close().map_err(|error| error.to_string())
@@ -246,6 +272,32 @@ fn start_window_drag(window: WebviewWindow) -> Result<(), String> {
 fn set_always_on_top(window: WebviewWindow, enabled: bool) -> Result<(), String> {
     window
         .set_always_on_top(enabled)
+        .map_err(|error| error.to_string())?;
+    if enabled {
+        dock_to_top(&window)?;
+    }
+    Ok(())
+}
+
+fn dock_to_top(window: &WebviewWindow) -> Result<(), String> {
+    let monitor = window
+        .current_monitor()
+        .map_err(|error| error.to_string())?
+        .or(window
+            .primary_monitor()
+            .map_err(|error| error.to_string())?);
+    let Some(monitor) = monitor else {
+        return Ok(());
+    };
+    let width = window
+        .outer_size()
+        .map_err(|error| error.to_string())?
+        .width as i32;
+    let origin = monitor.position();
+    let x = origin.x + (monitor.size().width as i32 - width) / 2;
+    let y = origin.y + (12.0 * monitor.scale_factor()) as i32;
+    window
+        .set_position(PhysicalPosition::new(x, y))
         .map_err(|error| error.to_string())
 }
 
@@ -389,15 +441,9 @@ async fn transcribe_audio(
 
     match provider.as_str() {
         "local" => {
-            let config = read_local_speech_config(&app)?.ok_or_else(|| {
-                "Local transcription needs whisper.cpp and a local Whisper model configured in Settings.".to_string()
-            })?;
-            if !config.executable.is_file() || !config.model.is_file() {
-                return Err(
-                    "The configured whisper.cpp executable or model file no longer exists."
-                        .to_string(),
-                );
-            }
+            let dir = speech_dir(&app, "whisper")?;
+            let executable = dir.join("whisper-cli.exe");
+            let model = dir.join("ggml-base.en.bin");
 
             let sequence = AUDIO_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let prefix = format!("vela-voice-{}-{sequence}", std::process::id());
@@ -410,9 +456,16 @@ async fn transcribe_audio(
                 .map_err(|error| format!("Couldn't prepare local audio: {error}"))?;
 
             let result = tauri::async_runtime::spawn_blocking(move || {
-                let process = Command::new(&config.executable)
+                let process = Command::new(&executable)
+                    .current_dir(&dir)
                     .arg("-m")
-                    .arg(&config.model)
+                    .arg(&model)
+                    .arg("-t")
+                    .arg(
+                        std::thread::available_parallelism()
+                            .map_or(4, |n| n.get().min(8))
+                            .to_string(),
+                    )
                     .arg("-f")
                     .arg(&audio_path)
                     .arg("-otxt")
@@ -475,51 +528,46 @@ async fn transcribe_audio(
     }
 }
 
-#[tauri::command]
-fn get_local_speech_status(app: AppHandle) -> Result<LocalSpeechStatus, String> {
-    match read_local_speech_config(&app)? {
-        Some(config) => Ok(LocalSpeechStatus {
-            configured: config.executable.is_file() && config.model.is_file(),
-            executable: Some(config.executable.display().to_string()),
-            model: Some(config.model.display().to_string()),
-        }),
-        None => Ok(LocalSpeechStatus {
-            configured: false,
-            executable: None,
-            model: None,
-        }),
+async fn stream_lines<F>(
+    mut response: reqwest::Response,
+    on_delta: &Channel<String>,
+    mut parse: F,
+) -> Result<String, String>
+where
+    F: FnMut(&str) -> Option<Result<String, String>>,
+{
+    let mut buffer = String::new();
+    let mut full = String::new();
+    let mut handle = |line: &str, full: &mut String| -> Result<(), String> {
+        let line = line.trim();
+        if line.is_empty() {
+            return Ok(());
+        }
+        if let Some(delta) = parse(line) {
+            let delta = delta?;
+            if !delta.is_empty() {
+                full.push_str(&delta);
+                let _ = on_delta.send(delta);
+            }
+        }
+        Ok(())
+    };
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("The response stream was interrupted: {error}"))?
+    {
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(index) = buffer.find('\n') {
+            let line: String = buffer.drain(..=index).collect();
+            handle(&line, &mut full)?;
+        }
     }
-}
-
-#[tauri::command]
-fn save_local_speech_config(
-    app: AppHandle,
-    executable: String,
-    model: String,
-) -> Result<(), String> {
-    let executable = PathBuf::from(executable.trim())
-        .canonicalize()
-        .map_err(|error| format!("Couldn't find whisper.cpp executable: {error}"))?;
-    let model = PathBuf::from(model.trim())
-        .canonicalize()
-        .map_err(|error| format!("Couldn't find the local Whisper model: {error}"))?;
-    if !executable.is_file() || !model.is_file() {
-        return Err("Choose a whisper.cpp executable and an existing model file.".to_string());
+    handle(&buffer, &mut full)?;
+    if full.trim().is_empty() {
+        return Err("The assistant returned an empty response. Try again.".to_string());
     }
-
-    let config = LocalSpeechConfig { executable, model };
-    let contents = serde_json::to_vec(&config).map_err(|error| error.to_string())?;
-    fs::write(local_speech_config_path(&app)?, contents).map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn delete_local_speech_config(app: AppHandle) -> Result<(), String> {
-    let path = local_speech_config_path(&app)?;
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.to_string()),
-    }
+    Ok(full)
 }
 
 #[tauri::command]
@@ -530,6 +578,7 @@ async fn send_chat_message(
     model: String,
     full_privacy: bool,
     screen_image: Option<String>,
+    on_delta: Channel<String>,
 ) -> Result<String, String> {
     validate_privacy_provider(&provider, full_privacy)?;
 
@@ -599,7 +648,7 @@ async fn send_chat_message(
                 .json(&json!({
                     "model": model,
                     "messages": request_messages,
-                    "stream": false,
+                    "stream": true,
                     "keep_alive": "10m",
                     "options": {
                         "num_ctx": 4096,
@@ -612,20 +661,23 @@ async fn send_chat_message(
                 .await
                 .map_err(|error| format!("Couldn't reach local Ollama: {error}"))?;
             let status = response.status();
-            let result = response
-                .json::<OllamaChatResponse>()
-                .await
-                .map_err(|error| format!("Couldn't read the local model response: {error}"))?;
             if !status.is_success() {
-                return Err(result
-                    .error
-                    .unwrap_or_else(|| format!("Ollama returned {status}.")));
+                let body = response.text().await.unwrap_or_default();
+                let message = serde_json::from_str::<Value>(&body)
+                    .ok()
+                    .and_then(|value| value["error"].as_str().map(str::to_string));
+                return Err(message.unwrap_or_else(|| format!("Ollama returned {status}.")));
             }
-            result
-                .message
-                .map(|message| message.content)
-                .filter(|content| !content.trim().is_empty())
-                .ok_or_else(|| "Your local model returned an empty response.".to_string())
+            stream_lines(response, &on_delta, |line| {
+                let value: Value = serde_json::from_str(line).ok()?;
+                if let Some(error) = value["error"].as_str() {
+                    return Some(Err(error.to_string()));
+                }
+                value["message"]["content"]
+                    .as_str()
+                    .map(|text| Ok(text.to_string()))
+            })
+            .await
         }
         "openai" if full_privacy => Err("Full Privacy Mode blocked a cloud request.".to_string()),
         "openai" => {
@@ -670,28 +722,31 @@ async fn send_chat_message(
                     "model": "gpt-4o-mini",
                     "messages": request_messages,
                     "temperature": 0.7,
-                    "max_tokens": 700
+                    "max_tokens": 700,
+                    "stream": true
                 }))
                 .send()
                 .await
                 .map_err(|error| format!("Couldn't reach OpenAI: {error}"))?;
             let status = response.status();
-            let result = response
-                .json::<OpenAiResponse>()
-                .await
-                .map_err(|error| format!("Couldn't read the assistant response: {error}"))?;
             if !status.is_success() {
-                return Err(result
-                    .error
-                    .map(|error| error.message)
-                    .unwrap_or_else(|| format!("OpenAI returned {status}.")));
+                let body = response.text().await.unwrap_or_default();
+                let message = serde_json::from_str::<Value>(&body)
+                    .ok()
+                    .and_then(|value| value["error"]["message"].as_str().map(str::to_string));
+                return Err(message.unwrap_or_else(|| format!("OpenAI returned {status}.")));
             }
-            result
-                .choices
-                .and_then(|choices| choices.into_iter().next())
-                .map(|choice| choice.message.content)
-                .filter(|content| !content.trim().is_empty())
-                .ok_or_else(|| "The assistant returned an empty response. Try again.".to_string())
+            stream_lines(response, &on_delta, |line| {
+                let data = line.strip_prefix("data:")?.trim();
+                if data == "[DONE]" {
+                    return None;
+                }
+                let value: Value = serde_json::from_str(data).ok()?;
+                value["choices"][0]["delta"]["content"]
+                    .as_str()
+                    .map(|text| Ok(text.to_string()))
+            })
+            .await
         }
         _ => Err("Choose either OpenAI or a local Ollama model.".to_string()),
     }
@@ -711,9 +766,7 @@ pub fn run() {
             save_api_key,
             delete_api_key,
             get_local_ai_status,
-            get_local_speech_status,
-            save_local_speech_config,
-            delete_local_speech_config,
+            synthesize_speech,
             transcribe_audio,
             send_chat_message
         ])
