@@ -317,12 +317,17 @@ function App() {
     window.localStorage.setItem("vela.alwaysOnTop", String(alwaysOnTop));
   }, [alwaysOnTop]);
 
+  const lastMessageCount = useRef(0);
   useEffect(() => {
-    if (conversationRef.current) {
-      conversationRef.current.scrollTop =
-        conversationRef.current.scrollHeight;
+    // Only jump down when a new message is added, never while a reply streams in.
+    if (messages.length !== lastMessageCount.current) {
+      lastMessageCount.current = messages.length;
+      if (conversationRef.current) {
+        conversationRef.current.scrollTop =
+          conversationRef.current.scrollHeight;
+      }
     }
-  }, [messages, isSending]);
+  }, [messages.length]);
 
   useEffect(() => {
     if (expanded && !settingsOpen) {
