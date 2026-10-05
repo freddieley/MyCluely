@@ -974,6 +974,11 @@ button {
   font: inherit;
   font-size: 12px;
   line-height: 1.5;
+  scrollbar-width: none;
+}
+
+.composer-field textarea::-webkit-scrollbar {
+  display: none;
 }
 
 .composer-field textarea::placeholder {
