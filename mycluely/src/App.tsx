@@ -36,11 +36,20 @@ type LocalAiStatus = {
 };
 
 const HOTKEY = "CommandOrControl+Shift+Space";
-const CHAT_SUGGESTIONS = [
+const FALLBACK_SUGGESTIONS = [
   "Help me prep for an interview",
   "Make this sound more confident",
   "Give me a clever way to start",
+  "Talk me through a tough decision",
+  "Explain something I keep avoiding",
+  "Draft a reply I've been dreading",
+  "Roast my plan, kindly",
+  "Teach me something in two minutes",
 ];
+
+function pickFallbackSuggestions() {
+  return [...FALLBACK_SUGGESTIONS].sort(() => Math.random() - 0.5).slice(0, 3);
+}
 
 const personalities: Record<
   AssistantPersonality,
@@ -316,6 +325,51 @@ function App() {
     });
     window.localStorage.setItem("vela.alwaysOnTop", String(alwaysOnTop));
   }, [alwaysOnTop]);
+
+  const [suggestions, setSuggestions] = useState<string[]>(() => pickFallbackSuggestions());
+  const noMessages = messages.length === 0;
+  const providerReady =
+    provider === "openai" ? apiKeyPresent : Boolean(localModel);
+  useEffect(() => {
+    if (!isTauri() || !expanded || !noMessages || !providerReady) return;
+    let cancelled = false;
+    setSuggestions(pickFallbackSuggestions());
+    const sink = new Channel<string>();
+    sink.onmessage = () => {};
+    const seed = Math.random().toString(36).slice(2, 8);
+    invoke<string>("send_chat_message", {
+      messages: [
+        {
+          role: "user",
+          content:
+            `Write 3 fresh, specific, varied conversation starters a user might tap to begin chatting with you (variety seed: ${seed}). ` +
+            "Mix topics: work, writing, decisions, social situations, learning, ideas. " +
+            "Each is under 7 words, written as something the user would say to you. " +
+            "Reply with exactly 3 lines, no numbering, bullets, quotes or extra text.",
+        },
+      ],
+      personality,
+      provider,
+      model: localModel,
+      fullPrivacy,
+      screenImage: null,
+      onDelta: sink,
+    })
+      .then((reply) => {
+        const lines = reply
+          .split("\n")
+          .map((line) => line.replace(/^[\s\-*\d.)"“]+|["”\s]+$/g, "").trim())
+          .filter((line) => line.length > 3 && line.length <= 60)
+          .slice(0, 3);
+        if (!cancelled && lines.length === 3) setSuggestions(lines);
+      })
+      .catch((error: unknown) => {
+        console.error("Couldn't generate suggestions:", error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [expanded, noMessages, providerReady, personality, provider, localModel, fullPrivacy]);
 
   const lastMessageCount = useRef(0);
   useEffect(() => {
@@ -1480,7 +1534,7 @@ function App() {
                     <h1>Hey, I’m in your corner.</h1>
                     <p>Bring me the awkward bit, the big question, or the blank page. We’ll figure it out together.</p>
                     <div className="suggestion-list">
-                      {CHAT_SUGGESTIONS.map((suggestion) => (
+                      {suggestions.map((suggestion) => (
                         <button
                           key={suggestion}
                           type="button"
