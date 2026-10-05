@@ -36,6 +36,48 @@ type LocalAiStatus = {
 };
 
 const HOTKEY = "CommandOrControl+Shift+Space";
+const SHORTCUT_GROUPS: { group: string; items: [string, string][] }[] = [
+  {
+    group: "Anywhere (global)",
+    items: [["Ctrl+Shift+Space", "Start/stop voice note"]],
+  },
+  {
+    group: "Talk to Vela",
+    items: [
+      ["Ctrl+L", "Open chat & focus the message box"],
+      ["Enter", "Send message"],
+      ["Shift+Enter", "New line"],
+      ["Ctrl+Shift+N", "New conversation"],
+      ["Ctrl+Shift+M", "Start/stop voice note"],
+    ],
+  },
+  {
+    group: "Context",
+    items: [
+      ["Ctrl+Shift+S", "Attach/detach screen"],
+      ["Ctrl+Shift+E", "Start/stop meeting capture"],
+      ["Ctrl+Shift+D", "Delete meeting transcript"],
+    ],
+  },
+  {
+    group: "Voice & window",
+    items: [
+      ["Ctrl+Shift+V", "Toggle speaking replies"],
+      ["Ctrl+Shift+.", "Stop speaking"],
+      ["Ctrl+Shift+P", "Pin/unpin on top"],
+      ["Ctrl+J", "Expand/collapse panel"],
+    ],
+  },
+  {
+    group: "Settings & help",
+    items: [
+      ["Ctrl+,", "Open settings"],
+      ["Ctrl+1 / 2 / 3", "Wingmate / Coach / Direct"],
+      ["Ctrl+/ or F1", "Show this shortcut list"],
+      ["Esc", "Close help, then settings, then panel"],
+    ],
+  },
+];
 const FALLBACK_SUGGESTIONS = [
   "Help me prep for an interview",
   "Make this sound more confident",
@@ -83,6 +125,9 @@ function App() {
     useState("Ready");
 
   const [settingsOpen, setSettingsOpen] =
+    useState(false);
+
+  const [shortcutsOpen, setShortcutsOpen] =
     useState(false);
 
   const [expanded, setExpanded] =
@@ -854,6 +899,61 @@ function App() {
     }
   };
 
+  const shortcutHandlerRef = useRef<(event: KeyboardEvent) => void>(() => {});
+  shortcutHandlerRef.current = (event) => {
+    const mod = event.ctrlKey || event.metaKey;
+    const key = event.key;
+
+    if (key === "Escape") {
+      if (shortcutsOpen) setShortcutsOpen(false);
+      else if (settingsOpen) void openPanel("chat");
+      else if (expanded) void collapsePanel();
+      return;
+    }
+    if (key === "F1" || (mod && key === "/")) {
+      event.preventDefault();
+      setShortcutsOpen((value) => !value);
+      return;
+    }
+    if (!mod) return;
+
+    const code = event.code;
+    const run = (action: () => void) => {
+      event.preventDefault();
+      action();
+    };
+
+    if (event.shiftKey) {
+      if (code === "KeyM") run(() => void toggleListening());
+      else if (code === "KeyS") run(() => (screenSharing ? stopScreenContext() : void captureScreen()));
+      else if (code === "KeyE") run(() => (meetingCapture ? stopMeetingCapture() : void startMeetingCapture()));
+      else if (code === "KeyD") run(() => { meetingTranscriptRef.current = ""; setMeetingTranscript(""); });
+      else if (code === "KeyN") run(() => { setMessages([]); setChatError(""); });
+      else if (code === "KeyP") run(() => setAlwaysOnTop((value) => !value));
+      else if (code === "KeyV") run(() => {
+        const next = !speakReplies;
+        setSpeakReplies(next);
+        window.localStorage.setItem("vela.speakReplies", String(next));
+        if (!next) window.speechSynthesis?.cancel();
+      });
+      else if (code === "Period") run(() => window.speechSynthesis?.cancel());
+      return;
+    }
+
+    if (code === "KeyL") run(() => { void openPanel("chat").then(() => setTimeout(() => composerRef.current?.focus(), 50)); });
+    else if (code === "KeyJ") run(() => void (expanded ? collapsePanel() : openPanel("chat")));
+    else if (code === "Comma") run(() => void openPanel("settings"));
+    else if (code === "Digit1") run(() => selectPersonality("wingmate"));
+    else if (code === "Digit2") run(() => selectPersonality("coach"));
+    else if (code === "Digit3") run(() => selectPersonality("direct"));
+  };
+
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => shortcutHandlerRef.current(event);
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, []);
+
   const saveApiKey = async () => {
     const apiKey = apiKeyInput.trim();
     if (!apiKey) {
@@ -1526,6 +1626,7 @@ function App() {
                   <p className="credential-status" role="status">{credentialStatus}</p>
                 )}
               </div>
+              <button type="button" className="remove-key-button" onClick={() => setShortcutsOpen(true)}>Keyboard shortcuts (Ctrl+/)</button>
               <button type="button" className="back-to-chat" onClick={() => void openPanel("chat")}>
                 Back to chat <span aria-hidden="true">→</span>
               </button>
@@ -1647,7 +1748,7 @@ function App() {
                   </button>
                 </div>
                 <div className="composer-footer">
-                  <span>{fullPrivacy ? "Full Privacy Mode · local model only" : provider === "local" ? "On-device · Ollama" : "Cloud · OpenAI"}{screenSharing ? " · Screen attached when you send" : ""}</span>
+                  <span title="Keyboard shortcuts">Ctrl+/ shortcuts · {fullPrivacy ? "Full Privacy Mode · local model only" : provider === "local" ? "On-device · Ollama" : "Cloud · OpenAI"}{screenSharing ? " · Screen attached when you send" : ""}</span>
                   {messages.length > 0 && (
                     <button
                       type="button"
@@ -1664,6 +1765,31 @@ function App() {
             </>
           )}
         </section>
+      )}
+      {shortcutsOpen && (
+        <div className="shortcuts-overlay" role="dialog" aria-label="Keyboard shortcuts" onClick={() => setShortcutsOpen(false)}>
+          <div className="shortcuts-card" onClick={(event) => event.stopPropagation()}>
+            <div className="shortcuts-head">
+              <strong>Keyboard shortcuts</strong>
+              <button type="button" onClick={() => setShortcutsOpen(false)} aria-label="Close shortcuts">Esc</button>
+            </div>
+            {SHORTCUT_GROUPS.map(({ group, items }) => (
+              <div key={group} className="shortcuts-group">
+                <h3>{group}</h3>
+                {items.map(([keys, label]) => (
+                  <div key={keys} className="shortcut-row">
+                    <span>{label}</span>
+                    <span className="kbd-set">
+                      {keys.split(" or ").map((combo, i) => (
+                        <span key={combo}>{i > 0 && " or "}{combo.split("+").map((k, j) => <kbd key={j}>{k}</kbd>)}</span>
+                      ))}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
       )}
       <video ref={screenVideoRef} className="capture-preview" autoPlay muted playsInline aria-hidden="true" />
     </main>
