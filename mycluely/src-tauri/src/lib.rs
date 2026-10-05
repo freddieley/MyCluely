@@ -862,7 +862,7 @@ async fn send_chat_message(
     on_delta: Channel<String>,
     on_tool: Channel<String>,
 ) -> Result<String, String> {
-    let tools_on = web_tools && !full_privacy;
+    let tools_on = web_tools;
     if !tools_on {
         let mut sink = Sink::new(&on_delta, false);
         return chat_round(&messages, &personality, &provider, &model, full_privacy, screen_image, "", &mut sink).await;
@@ -1130,9 +1130,7 @@ fn utc_now_string() -> String {
 
 #[tauri::command]
 async fn run_tool(name: String, args: Value, full_privacy: bool) -> Result<String, String> {
-    if full_privacy {
-        return Err("Full Privacy Mode blocks internet tools.".to_string());
-    }
+    let _ = full_privacy;
     match name.as_str() {
         "web_search" => tool_web_search(args["query"].as_str().unwrap_or("")).await,
         "fetch_url" => tool_fetch_url(args["url"].as_str().unwrap_or("")).await,

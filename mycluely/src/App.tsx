@@ -1633,11 +1633,11 @@ function App() {
                     <span><strong>Speak replies aloud</strong><small>Uses system voices. Full Privacy Mode only uses voices marked local by your system. Use Stop speaking to silence a reply.</small></span>
                   </label>
                   <label className="privacy-toggle">
-                    <input type="checkbox" checked={webTools && !fullPrivacy} disabled={fullPrivacy} onChange={(event) => {
+                    <input type="checkbox" checked={webTools} onChange={(event) => {
                       setWebTools(event.target.checked);
                       window.localStorage.setItem("vela.webTools", String(event.target.checked));
                     }} />
-                    <span><strong>Web access</strong><small>{fullPrivacy ? "Off in Full Privacy Mode - nothing leaves your device." : "Lets Vela search the web and read pages for current information."}</small></span>
+                    <span><strong>Web access</strong><small>{fullPrivacy ? "Allowed in Full Privacy Mode. Only search queries and page requests leave your device; the model stays local." : "Lets Vela search the web and read pages for current information."}</small></span>
                   </label>
                   <button type="button" className="remove-key-button" onClick={() => window.speechSynthesis?.cancel()}>Stop speaking</button>
                 </div>
