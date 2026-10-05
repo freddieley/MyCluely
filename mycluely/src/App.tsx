@@ -1495,7 +1495,13 @@ function App() {
                         <div className="message-content">
                         {message.role === "assistant" && <span className="message-author">VELA</span>}
                           {message.role === "assistant"
-                            ? <div className="md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>
+                            ? <div className="md"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children }) => (
+                              <a href={href} target="_blank" rel="noreferrer" onClick={(event) => {
+                                event.preventDefault();
+                                if (href && isTauri()) void import("@tauri-apps/plugin-opener").then((m) => m.openUrl(href));
+                                else if (href) window.open(href, "_blank");
+                              }}>{children}</a>
+                            ) }}>{message.content}</ReactMarkdown></div>
                             : <p>{message.content}</p>}
                         {message.role === "assistant" && <button type="button" className="speak-message" onClick={() => {
                           const playing = ttsAudioRef.current && !ttsAudioRef.current.paused && !ttsAudioRef.current.ended;
