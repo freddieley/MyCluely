@@ -1061,7 +1061,18 @@ function App() {
   const speakText = (text: string) => {
     if (!speakReplies || !("speechSynthesis" in window)) return;
     window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+    const utterance = new SpeechSynthesisUtterance(text);
+    if (fullPrivacyRef.current) {
+      const localVoice = window.speechSynthesis
+        .getVoices()
+        .find((voice) => voice.localService);
+      if (!localVoice) {
+        setChatError("Full Privacy Mode needs an installed local speech voice to speak replies.");
+        return;
+      }
+      utterance.voice = localVoice;
+    }
+    window.speechSynthesis.speak(utterance);
   };
 
   const sendMessage = async (messageText: string) => {
@@ -1479,7 +1490,7 @@ function App() {
                       window.localStorage.setItem("vela.speakReplies", String(event.target.checked));
                       if (!event.target.checked) window.speechSynthesis?.cancel();
                     }} />
-                    <span><strong>Speak replies aloud</strong><small>Uses the voices available on your system. Use Stop speaking to silence a reply.</small></span>
+                    <span><strong>Speak replies aloud</strong><small>Uses system voices. Full Privacy Mode only uses voices marked local by your system. Use Stop speaking to silence a reply.</small></span>
                   </label>
                   <button type="button" className="remove-key-button" onClick={() => window.speechSynthesis?.cancel()}>Stop speaking</button>
                 </div>
