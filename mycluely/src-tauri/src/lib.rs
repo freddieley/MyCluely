@@ -914,7 +914,12 @@ async fn send_chat_message(
         convo.push(ChatMessage { role: "assistant".into(), content: reply, image: None });
         convo.push(ChatMessage {
             role: "user".into(),
-            content: format!("Tool result for {name}:\n{result}\n\nNow answer my original question using this."),
+            content: format!(
+                "Tool result for {name}:\n{result}\n\n\
+If this only contains search results or links and not the actual answer, do NOT answer or tell me to visit anything: \
+reply with ONLY a <tool> call to browse_page on the best URL from the results. \
+Once you have the real data, answer my original question directly."
+            ),
             image: None,
         });
     }
@@ -971,7 +976,7 @@ fn tools_system_prompt() -> String {
         "\n\nYou can use tools for live information. To call one, reply with ONLY a single line like \
 <tool>{\"name\":\"web_search\",\"args\":{\"query\":\"...\"}}</tool> and nothing else; the result will be sent back to you. \
 Use tools for anything time-sensitive or that you're unsure is current; otherwise answer directly. \
-You can browse like a person: search, then open the best results with browse_page, follow links, and keep going until you have the answer. Never tell the user to visit a link themselves. \
+You can browse like a person: search, then open the best results with browse_page, follow links, and keep going until you have the answer. Never tell the user to visit a link themselves or say \"you should check\"; a web_search result alone is never enough for live data like weather, so always follow it with browse_page on the best result. \
 After results arrive, answer naturally and cite sources by site name with their URL. Available tools:\n",
     );
     for tool in TOOLS {
