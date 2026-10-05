@@ -404,6 +404,28 @@ fn validate_privacy_provider(provider: &str, full_privacy: bool) -> Result<(), S
     Ok(())
 }
 
+// Removes Whisper's non-speech annotations such as [BLANK_AUDIO] or (music).
+fn clean_transcript(text: &str) -> String {
+    let mut out = String::new();
+    let mut closer: Option<char> = None;
+    for ch in text.chars() {
+        match closer {
+            Some(end) => {
+                if ch == end {
+                    closer = None;
+                }
+            }
+            None => match ch {
+                '[' => closer = Some(']'),
+                '(' => closer = Some(')'),
+                '♪' | '♫' => {}
+                _ => out.push(ch),
+            },
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[tauri::command]
 async fn transcribe_audio(
     app: AppHandle,
@@ -483,7 +505,7 @@ async fn transcribe_audio(
                     ));
                 }
                 fs::read_to_string(&output_path)
-                    .map(|text| text.trim().to_string())
+                    .map(|text| clean_transcript(&text))
                     .map_err(|error| format!("Couldn't read local transcript: {error}"))
             })
             .await;
@@ -524,7 +546,7 @@ async fn transcribe_audio(
             response
                 .json::<OpenAiTranscription>()
                 .await
-                .map(|result| result.text.trim().to_string())
+                .map(|result| clean_transcript(&result.text))
                 .map_err(|error| format!("Couldn't read the transcription response: {error}"))
         }
         _ => Err("Choose either OpenAI or local transcription.".to_string()),
