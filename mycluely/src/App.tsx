@@ -12,7 +12,36 @@ type CopilotState =
   | "thinking"
   | "responding";
 
+type AssistantPersonality =
+  | "wingmate"
+  | "coach"
+  | "direct";
+
 const HOTKEY = "CommandOrControl+Shift+Space";
+
+const personalities: Record<
+  AssistantPersonality,
+  { label: string; description: string; ready: string; listening: string }
+> = {
+  wingmate: {
+    label: "Wingmate",
+    description: "A little wit, always on your side.",
+    ready: "Ready when you are.",
+    listening: "I'm all ears.",
+  },
+  coach: {
+    label: "Coach",
+    description: "Calm, thoughtful, and in your corner.",
+    ready: "Take your time.",
+    listening: "I'm right here.",
+  },
+  direct: {
+    label: "Direct",
+    description: "Clear, concise, straight to it.",
+    ready: "Standing by.",
+    listening: "Listening.",
+  },
+};
 
 function App() {
   const [copilotState, setCopilotState] =
@@ -23,6 +52,20 @@ function App() {
 
   const [microphoneStatus, setMicrophoneStatus] =
     useState("Ready");
+
+  const [settingsOpen, setSettingsOpen] =
+    useState(false);
+
+  const [personality, setPersonality] =
+    useState<AssistantPersonality>(() => {
+      const savedPersonality =
+        window.localStorage.getItem("mycluely.personality");
+
+      return savedPersonality === "coach" ||
+        savedPersonality === "direct"
+        ? savedPersonality
+        : "wingmate";
+    });
 
   const audioContextRef =
     useRef<AudioContext | null>(null);
@@ -373,6 +416,16 @@ function App() {
     }
   };
 
+  const selectPersonality = (
+    nextPersonality: AssistantPersonality,
+  ) => {
+    setPersonality(nextPersonality);
+    window.localStorage.setItem(
+      "mycluely.personality",
+      nextPersonality,
+    );
+  };
+
   /*
    * --------------------------------------------------------------------------
    * VISUAL STATE
@@ -383,9 +436,13 @@ function App() {
 
   const stateLabel =
     copilotState === "idle"
-      ? microphoneStatus
+      ? microphoneStatus === "Ready"
+        ? personalities[personality].ready
+        : microphoneStatus
       : copilotState === "listening"
-        ? microphoneStatus
+        ? microphoneStatus === "Listening"
+          ? personalities[personality].listening
+          : microphoneStatus
         : copilotState === "thinking"
           ? "Thinking"
           : "Responding";
@@ -401,6 +458,7 @@ function App() {
     >
       <section
         className={`copilot-bar state-${copilotState}`}
+        data-personality={personality}
       >
         <div
           className="copilot-drag-region"
@@ -422,54 +480,88 @@ function App() {
             </span>
           </div>
 
-          <div className="copilot-status" role="status" aria-live="polite">
+          {settingsOpen ? (
             <div
-              className="state-indicator"
-              role={copilotState === "listening" ? "img" : undefined}
-              aria-label={
-                copilotState === "listening"
-                  ? `Microphone level ${Math.round(level * 100)}%`
-                  : undefined
-              }
+              className="personality-picker"
+              onMouseDown={(event) => event.stopPropagation()}
+              role="group"
+              aria-label="Assistant personality"
             >
-              {copilotState === "listening" &&
-                [1, 0.72, 1.25, 0.88, 0.62].map(
-                  (scale, index) => (
-                    <span
-                      key={index}
-                      style={{
-                        transform: `scaleY(${Math.max(
-                          0.08,
-                          level * scale,
-                        )})`,
-                        opacity: 0.55 + level * 0.45,
-                      }}
-                      aria-hidden="true"
-                    />
+              <div className="personality-heading">
+                <span className="settings-label">YOUR WINGMATE</span>
+                <span className="personality-description">
+                  {personalities[personality].description}
+                </span>
+              </div>
+              <div className="personality-options">
+                {(Object.keys(personalities) as AssistantPersonality[]).map(
+                  (option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      className={`personality-option${
+                        personality === option ? " selected" : ""
+                      }`}
+                      onClick={() => selectPersonality(option)}
+                      aria-pressed={personality === option}
+                      title={personalities[option].description}
+                    >
+                      {personalities[option].label}
+                    </button>
                   ),
                 )}
-
-              {copilotState === "thinking" && (
-                <div className="thinking-spinner" />
-              )}
-
-              {copilotState === "responding" && (
-                <div className="responding-pulse" />
-              )}
-
-              {copilotState === "idle" && (
-                <div
-                  className={
-                    microphoneStatus === "Microphone unavailable"
-                      ? "error-dot"
-                      : "idle-dot"
-                  }
-                />
-              )}
+              </div>
             </div>
+          ) : (
+            <div className="copilot-status" role="status" aria-live="polite">
+              <div
+                className="state-indicator"
+                role={copilotState === "listening" ? "img" : undefined}
+                aria-label={
+                  copilotState === "listening"
+                    ? `Microphone level ${Math.round(level * 100)}%`
+                    : undefined
+                }
+              >
+                {copilotState === "listening" &&
+                  [1, 0.72, 1.25, 0.88, 0.62].map(
+                    (scale, index) => (
+                      <span
+                        key={index}
+                        style={{
+                          transform: `scaleY(${Math.max(
+                            0.08,
+                            level * scale,
+                          )})`,
+                          opacity: 0.55 + level * 0.45,
+                        }}
+                        aria-hidden="true"
+                      />
+                    ),
+                  )}
 
-            <span>{stateLabel}</span>
-          </div>
+                {copilotState === "thinking" && (
+                  <div className="thinking-spinner" />
+                )}
+
+                {copilotState === "responding" && (
+                  <div className="responding-pulse" />
+                )}
+
+                {copilotState === "idle" && (
+                  <div
+                    className={
+                      microphoneStatus === "Microphone unavailable"
+                        ? "error-dot"
+                        : "idle-dot"
+                    }
+                  />
+                )}
+              </div>
+
+              <span>{stateLabel}</span>
+            </div>
+          )}
         </div>
 
         <div
@@ -480,8 +572,49 @@ function App() {
         >
           <button
             type="button"
-            className="icon-button"
+            className={`icon-button microphone-button${
+              copilotState === "listening" ? " active" : ""
+            }`}
+            onClick={() => void toggleListening()}
+            aria-label={
+              copilotState === "listening"
+                ? "Stop listening"
+                : "Start listening"
+            }
+            aria-pressed={copilotState === "listening"}
+            title={
+              copilotState === "listening"
+                ? "Stop listening"
+                : "Start listening (Ctrl+Shift+Space)"
+            }
+          >
+            {copilotState === "listening" ? (
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <rect x="7" y="7" width="10" height="10" rx="2" />
+              </svg>
+            ) : (
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="9" y="3" width="6" height="12" rx="3" />
+                <path d="M5 11a7 7 0 0 0 14 0M12 18v3m-4 0h8" />
+              </svg>
+            )}
+          </button>
+
+          <button
+            type="button"
+            className={`icon-button${settingsOpen ? " active" : ""}`}
+            onClick={() => setSettingsOpen((isOpen) => !isOpen)}
             aria-label="Settings"
+            aria-expanded={settingsOpen}
+            title="Assistant settings"
           >
             <svg
               viewBox="0 0 24 24"
