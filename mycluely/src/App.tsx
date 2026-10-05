@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
 import "./App.css";
 
 type CopilotState =
@@ -7,6 +8,8 @@ type CopilotState =
   | "listening"
   | "thinking"
   | "responding";
+
+const HOTKEY = "CommandOrControl+Shift+Space";
 
 const stateLabels: Record<CopilotState, string> = {
   idle: "Ready",
@@ -41,43 +44,49 @@ function App() {
     setSettingsOpen((current) => !current);
   }
 
-  /*
-   * Temporary development interaction.
-   *
-   * Pressing the number keys lets us preview the different
-   * personality states before the real microphone / AI pipeline
-   * exists.
-   */
   useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      switch (event.key) {
-        case "1":
-          setCopilotState("idle");
-          break;
+    let mounted = true;
 
-        case "2":
-          setCopilotState("listening");
-          break;
+    async function setupHotkey() {
+      try {
+        await register(HOTKEY, (event) => {
+          if (!mounted) {
+            return;
+          }
 
-        case "3":
-          setCopilotState("thinking");
-          break;
+          if (event.state === "Pressed") {
+            setSettingsOpen(false);
 
-        case "4":
-          setCopilotState("responding");
-          break;
+            setCopilotState((current) =>
+              current === "listening"
+                ? "idle"
+                : "listening",
+            );
+          }
+        });
 
-        case "Escape":
-          setSettingsOpen(false);
-          setCopilotState("idle");
-          break;
+        console.log(
+          `MyCluely hotkey registered: ${HOTKEY}`,
+        );
+      } catch (error) {
+        console.error(
+          "Failed to register MyCluely hotkey:",
+          error,
+        );
       }
     }
 
-    window.addEventListener("keydown", handleKeyDown);
+    setupHotkey();
 
     return () => {
-      window.removeEventListener("keydown", handleKeyDown);
+      mounted = false;
+
+      unregister(HOTKEY).catch((error) => {
+        console.error(
+          "Failed to unregister MyCluely hotkey:",
+          error,
+        );
+      });
     };
   }, []);
 
@@ -169,6 +178,7 @@ function App() {
               strokeLinejoin="round"
             >
               <circle cx="12" cy="12" r="3" />
+
               <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-1.8 1.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1.5 1.6v.1h-2.5v-.1a1.7 1.7 0 0 0-1.5-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1-1.8-1.8.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1.5H5.3v-2.5h.1a1.7 1.7 0 0 0 1.6-1.5 1.7 1.7 0 0 0-.3-1.9l-.1-.1 1.8-1.8.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1.5-1.6V5.3h2.5v.1a1.7 1.7 0 0 0 1.5 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1 1.8 1.8-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1.5h.1v2.5h-.1a1.7 1.7 0 0 0-1.6 1.5Z" />
             </svg>
           </button>
