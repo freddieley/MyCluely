@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import {
   register,
@@ -1012,8 +1014,16 @@ function App() {
     return jpeg;
   };
 
-  const speakText = async (text: string) => {
+  const speakText = async (rawText: string) => {
     if (!speakReplies) return;
+    const text = rawText
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/`([^`]*)`/g, "$1")
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+      .replace(/^\s{0,3}(#{1,6}|[-*+]|\d+\.|>)\s+/gm, "")
+      .replace(/[*_~|]+/g, "")
+      .trim();
+    if (!text) return;
     try {
       if (ttsAudioRef.current) ttsAudioRef.current.pause();
       const wav = await invoke<string>("synthesize_speech", { text });
@@ -1484,7 +1494,9 @@ function App() {
                         {message.role === "assistant" && <span className="message-avatar">V</span>}
                         <div className="message-content">
                         {message.role === "assistant" && <span className="message-author">VELA</span>}
-                          <p>{message.content}</p>
+                          {message.role === "assistant"
+                            ? <div className="md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>
+                            : <p>{message.content}</p>}
                         {message.role === "assistant" && <button type="button" className="speak-message" onClick={() => {
                           const playing = ttsAudioRef.current && !ttsAudioRef.current.paused && !ttsAudioRef.current.ended;
                           if (playing) ttsAudioRef.current?.pause();
