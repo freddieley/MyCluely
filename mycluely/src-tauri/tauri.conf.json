@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "MyCluely",
+  "productName": "Vela",
   "version": "0.1.0",
-  "identifier": "com.freddieley.mycluely",
+  "identifier": "com.freddieley.vela",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,8 +13,8 @@
     "windows": [
       {
         "label": "main",
-        "title": "MyCluely",
-        "width": 560,
+        "title": "Vela",
+        "width": 680,
         "height": 84,
         "resizable": false,
         "fullscreen": false,
