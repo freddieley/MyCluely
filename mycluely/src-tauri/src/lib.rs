@@ -423,7 +423,17 @@ fn clean_transcript(text: &str) -> String {
             },
         }
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    let cleaned = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized: String = cleaned
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase();
+    // Whisper hallucinates these phrases on silence.
+    match normalized.trim() {
+        "you" | "thank you" | "thanks" | "thanks for watching" | "bye" => String::new(),
+        _ => cleaned,
+    }
 }
 
 #[tauri::command]

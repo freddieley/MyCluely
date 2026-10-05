@@ -213,6 +213,10 @@ function App() {
     source.connect(offlineContext.destination);
     source.start(0);
     const mono = (await offlineContext.startRendering()).getChannelData(0);
+    let energy = 0;
+    for (let index = 0; index < mono.length; index += 1) energy += mono[index] * mono[index];
+    // Silent audio makes Whisper hallucinate words, so skip it.
+    if (Math.sqrt(energy / Math.max(1, mono.length)) < 0.002) return new Blob([], { type: "audio/wav" });
     const wav = new ArrayBuffer(44 + mono.length * 2);
     const header = new DataView(wav);
     const writeText = (offset: number, text: string) => {
@@ -249,6 +253,7 @@ function App() {
       const preparedAudio = activeProvider === "local"
         ? await toLocalWav(voiceNote)
         : voiceNote;
+      if (preparedAudio.size === 0) return;
       const bytes = new Uint8Array(await preparedAudio.arrayBuffer());
       let binary = "";
       const chunkSize = 0x8000;
@@ -980,6 +985,7 @@ function App() {
           const preparedAudio = activeProvider === "local"
             ? await toLocalWav(audio)
             : audio;
+          if (preparedAudio.size === 0) return;
           const bytes = new Uint8Array(await preparedAudio.arrayBuffer());
           let binary = "";
           for (let offset = 0; offset < bytes.length; offset += 0x8000) {
