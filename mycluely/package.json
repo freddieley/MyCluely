@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:cloud": "tauri build",
+    "build:local": "powershell -ExecutionPolicy Bypass -File scripts/fetch-ollama.ps1 && tauri build --config src-tauri/tauri.local.conf.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

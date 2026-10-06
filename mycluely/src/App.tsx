@@ -173,6 +173,8 @@ function App() {
     () => window.localStorage.getItem("vela.model") ?? "",
   );
   const [localStatusMessage, setLocalStatusMessage] = useState("");
+  const [localSetup, setLocalSetup] = useState<{ bundled: boolean; installed: boolean; running: boolean; defaultModel: string; progress: { active: boolean; label: string; percent: number; error: string | null } | null } | null>(null);
+  const [pullName, setPullName] = useState("");
   const [alwaysOnTop, setAlwaysOnTop] = useState(
     () => window.localStorage.getItem("vela.alwaysOnTop") !== "false",
   );
@@ -1022,6 +1024,46 @@ function App() {
     }
   };
 
+  useEffect(() => {
+    let stop = false;
+    let wasActive = false;
+    const tick = async () => {
+      try {
+        const setup = await invoke<NonNullable<typeof localSetup>>("get_local_ai_setup");
+        if (stop) return;
+        setLocalSetup(setup);
+        const active = Boolean(setup.progress?.active);
+        if (wasActive && !active) void refreshLocalModelsRef.current();
+        wasActive = active;
+      } catch { /* ignore */ }
+    };
+    void tick();
+    const id = window.setInterval(() => void tick(), 1500);
+    return () => { stop = true; window.clearInterval(id); };
+  }, []);
+
+  const refreshLocalModelsRef = useRef<() => Promise<void>>(async () => {});
+
+  const startLocalAction = async (command: string, args?: Record<string, unknown>) => {
+    try {
+      await invoke(command, args);
+      setLocalStatusMessage("");
+    } catch (error) {
+      setLocalStatusMessage(typeof error === "string" ? error : "That didn't work.");
+    }
+  };
+
+  const removeModel = async (name: string) => {
+    try {
+      await invoke("delete_model", { name });
+      await refreshLocalModels();
+    } catch (error) {
+      setLocalStatusMessage(typeof error === "string" ? error : "Couldn't delete that model.");
+    }
+  };
+
+  refreshLocalModelsRef.current = refreshLocalModels;
+
   const chooseProvider = (nextProvider: Provider) => {
     setProvider(nextProvider);
     window.localStorage.setItem("vela.provider", nextProvider);
@@ -1583,7 +1625,34 @@ function App() {
                     </p>
                   </div>
                 )}
-                {localStatusMessage && <p className="credential-status" role="status">{localStatusMessage}</p>}
+                <div className="local-model-setup">
+                  {localSetup && !localSetup.installed && !localSetup.running && (
+                    <>
+                      <p className="provider-copy">Run Vela offline: install the local AI engine and {localSetup.defaultModel} (about 2.5 GB download).</p>
+                      <button type="button" className="save-key-button" disabled={Boolean(localSetup.progress?.active)} onClick={() => void startLocalAction("install_local_ai")}>Install local AI</button>
+                    </>
+                  )}
+                  {localSetup?.progress?.active && (
+                    <p className="provider-copy" role="status">
+                      {localSetup.progress.label}{localSetup.progress.percent >= 0 ? ` - ${Math.round(localSetup.progress.percent)}%` : "..."}
+                    </p>
+                  )}
+                  {localSetup?.progress?.error && !localSetup.progress.active && <p className="credential-status" role="alert">{localSetup.progress.error}</p>}
+                  {(localSetup?.installed || localSetup?.running) && (
+                    <>
+                      <div className="local-model-row">
+                        <input type="text" placeholder="Get a model, e.g. llama3.2:3b" value={pullName} onChange={(event) => setPullName(event.target.value)} />
+                        <button type="button" className="save-key-button" disabled={!pullName.trim() || Boolean(localSetup?.progress?.active)} onClick={() => { void startLocalAction("pull_model", { name: pullName.trim() }); setPullName(""); }}>Install</button>
+                      </div>
+                      {localAiStatus?.models.map((model) => (
+                        <div className="local-model-row" key={model.name}>
+                          <span>{model.name}</span>
+                          <button type="button" className="save-key-button" onClick={() => void removeModel(model.name)}>Delete</button>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>                {localStatusMessage && <p className="credential-status" role="status">{localStatusMessage}</p>}
               </div>
 
               <div className="provider-card">

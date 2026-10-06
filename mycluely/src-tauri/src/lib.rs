@@ -943,7 +943,11 @@ pub fn run() {
             synthesize_speech,
             transcribe_audio,
             send_chat_message,
-            run_tool
+            run_tool,
+            get_local_ai_setup,
+            install_local_ai,
+            pull_model,
+            delete_model
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -975,75 +979,312 @@ fn ollama_reachable() -> bool {
     })
 }
 
+fn vela_dir(app: &AppHandle) -> PathBuf {
+    app.path()
+        .app_local_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("vela"))
+}
+
+fn exe_name() -> &'static str {
+    if cfg!(windows) { "ollama.exe" } else { "ollama" }
+}
+
+fn bundled_ollama(app: &AppHandle) -> Option<PathBuf> {
+    let resources = app.path().resource_dir().ok()?;
+    [
+        resources.join("ollama").join(exe_name()),
+        resources.join("resources").join("ollama").join(exe_name()),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+}
+
+fn installed_ollama(app: &AppHandle) -> Option<PathBuf> {
+    let path = vela_dir(app).join("ollama").join(exe_name());
+    path.is_file().then_some(path)
+}
+
 fn find_ollama(app: &AppHandle) -> Option<PathBuf> {
-    let exe = if cfg!(windows) { "ollama.exe" } else { "ollama" };
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(resources) = app.path().resource_dir() {
-        candidates.push(resources.join("ollama").join(exe));
-        candidates.push(resources.join("resources").join("ollama").join(exe));
+    if let Some(path) = bundled_ollama(app).or_else(|| installed_ollama(app)) {
+        return Some(path);
     }
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        candidates.push(PathBuf::from(local).join("Programs").join("Ollama").join(exe));
-    }
-    if let Some(found) = candidates.into_iter().find(|path| path.is_file()) {
-        return Some(found);
+        let path = PathBuf::from(local).join("Programs").join("Ollama").join(exe_name());
+        if path.is_file() {
+            return Some(path);
+        }
     }
     std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).map(|dir| dir.join(exe)).find(|path| path.is_file())
+        std::env::split_paths(&paths).map(|dir| dir.join(exe_name())).find(|path| path.is_file())
     })
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SetupProgress {
+    active: bool,
+    label: String,
+    percent: f64,
+    error: Option<String>,
+}
+
+static PROGRESS: std::sync::Mutex<Option<SetupProgress>> = std::sync::Mutex::new(None);
+
+fn set_progress(label: &str, percent: f64) {
+    if let Ok(mut slot) = PROGRESS.lock() {
+        *slot = Some(SetupProgress { active: true, label: label.to_string(), percent, error: None });
+    }
+}
+
+fn finish_progress(error: Option<String>) {
+    if let Ok(mut slot) = PROGRESS.lock() {
+        *slot = Some(SetupProgress { active: false, label: String::new(), percent: 100.0, error });
+    }
+}
+
+fn progress_busy() -> bool {
+    PROGRESS.lock().ok().and_then(|p| p.as_ref().map(|p| p.active)).unwrap_or(false)
+}
+
+/// Starts Ollama if it is not already answering. Blocking; call from a worker thread.
+fn ensure_server(app: &AppHandle) -> Result<(), String> {
+    if ollama_reachable() {
+        return Ok(());
+    }
+    let path = find_ollama(app).ok_or("Local AI engine is not installed.")?;
+    let own = bundled_ollama(app).as_ref() == Some(&path) || installed_ollama(app).as_ref() == Some(&path);
+    let mut command = Command::new(path);
+    command
+        .arg("serve")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if own {
+        let models = vela_dir(app).join("models");
+        let seed = app.path().resource_dir().ok().map(|r| r.join("ollama-models"));
+        if let Some(seed) = seed.filter(|s| s.is_dir() && !models.exists()) {
+            set_progress("Preparing local model", -1.0);
+            let _ = copy_dir(&seed, &models);
+        }
+        let _ = fs::create_dir_all(&models);
+        command.env("OLLAMA_MODELS", &models);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let child = command.spawn().map_err(|e| format!("Could not start the local AI engine: {e}"))?;
+    if let Ok(mut slot) = OLLAMA_CHILD.lock() {
+        *slot = Some(child);
+    }
+    for _ in 0..60 {
+        std::thread::sleep(Duration::from_millis(500));
+        if ollama_reachable() {
+            return Ok(());
+        }
+    }
+    Err("The local AI engine did not start in time.".into())
+}
+
+async fn pull_model_stream(name: &str) -> Result<(), String> {
+    let mut response = reqwest::Client::new()
+        .post(format!("{OLLAMA_BASE_URL}/api/pull"))
+        .json(&json!({ "model": name, "stream": true }))
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach the local AI engine: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Download of {name} was refused ({}).", response.status()));
+    }
+    let mut buffer = String::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| format!("Download interrupted: {e}"))? {
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(pos) = buffer.find('\n') {
+            let line: String = buffer.drain(..=pos).collect();
+            let Ok(value) = serde_json::from_str::<Value>(line.trim()) else { continue };
+            if let Some(error) = value.get("error").and_then(Value::as_str) {
+                return Err(format!("Could not download {name}: {error}"));
+            }
+            let status = value.get("status").and_then(Value::as_str).unwrap_or("working");
+            let total = value.get("total").and_then(Value::as_f64).unwrap_or(0.0);
+            let done = value.get("completed").and_then(Value::as_f64).unwrap_or(0.0);
+            let percent = if total > 0.0 { done / total * 100.0 } else { -1.0 };
+            set_progress(&format!("Downloading {name}: {status}"), percent);
+        }
+    }
+    Ok(())
+}
+
+async fn download_ollama(app: &AppHandle) -> Result<(), String> {
+    let asset = match std::env::consts::ARCH {
+        "aarch64" => "ollama-windows-arm64.zip",
+        _ => "ollama-windows-amd64.zip",
+    };
+    if !cfg!(windows) {
+        return Err("One-click install is only available on Windows. Install Ollama from ollama.com instead.".into());
+    }
+    let dir = vela_dir(app);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let zip_path = dir.join("ollama-download.zip");
+    let url = format!("https://github.com/ollama/ollama/releases/latest/download/{asset}");
+    let mut response = reqwest::Client::new()
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Could not download Ollama: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Ollama download failed ({}).", response.status()));
+    }
+    let total = response.content_length().unwrap_or(0) as f64;
+    let mut file = fs::File::create(&zip_path).map_err(|e| e.to_string())?;
+    let mut done = 0.0;
+    while let Some(chunk) = response.chunk().await.map_err(|e| format!("Download interrupted: {e}"))? {
+        std::io::Write::write_all(&mut file, &chunk).map_err(|e| e.to_string())?;
+        done += chunk.len() as f64;
+        set_progress("Downloading local AI engine", if total > 0.0 { done / total * 100.0 } else { -1.0 });
+    }
+    drop(file);
+    set_progress("Installing local AI engine", -1.0);
+    let target = dir.join("ollama");
+    let extract_path = zip_path.clone();
+    let extract_target = target.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let file = fs::File::open(&extract_path).map_err(|e| e.to_string())?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+        archive.extract(&extract_target).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let _ = fs::remove_file(&zip_path);
+    if target.join(exe_name()).is_file() {
+        Ok(())
+    } else {
+        Err("The downloaded engine was missing ollama.exe.".into())
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalAiSetup {
+    bundled: bool,
+    installed: bool,
+    running: bool,
+    progress: Option<SetupProgress>,
+    default_model: &'static str,
+}
+
+#[tauri::command]
+async fn get_local_ai_setup(app: AppHandle) -> LocalAiSetup {
+    let running = http_client().get(format!("{OLLAMA_BASE_URL}/api/tags")).send().await.is_ok();
+    LocalAiSetup {
+        bundled: bundled_ollama(&app).is_some(),
+        installed: find_ollama(&app).is_some(),
+        running,
+        progress: PROGRESS.lock().ok().and_then(|p| p.clone()),
+        default_model: DEFAULT_LOCAL_MODEL,
+    }
+}
+
+#[tauri::command]
+fn install_local_ai(app: AppHandle) -> Result<(), String> {
+    if progress_busy() {
+        return Err("Another download is already running.".into());
+    }
+    set_progress("Starting", -1.0);
+    std::thread::spawn(move || {
+        let result: Result<(), String> = tauri::async_runtime::block_on(async {
+            if find_ollama(&app).is_none() {
+                download_ollama(&app).await?;
+            }
+            let handle = app.clone();
+            tauri::async_runtime::spawn_blocking(move || ensure_server(&handle))
+                .await
+                .map_err(|e| e.to_string())??;
+            let has_models = get_ollama_tags().await.map(|t| !t.models.is_empty()).unwrap_or(false);
+            if !has_models {
+                pull_model_stream(DEFAULT_LOCAL_MODEL).await?;
+            }
+            Ok(())
+        });
+        finish_progress(result.err());
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn pull_model(app: AppHandle, name: String) -> Result<(), String> {
+    let name = name.trim().to_string();
+    if name.is_empty() || name.len() > 100 || name.chars().any(|c| c.is_whitespace()) {
+        return Err("Enter a valid model name, like llama3.2:3b.".into());
+    }
+    if progress_busy() {
+        return Err("Another download is already running.".into());
+    }
+    set_progress(&format!("Downloading {name}"), -1.0);
+    std::thread::spawn(move || {
+        let result: Result<(), String> = tauri::async_runtime::block_on(async {
+            let handle = app.clone();
+            tauri::async_runtime::spawn_blocking(move || ensure_server(&handle))
+                .await
+                .map_err(|e| e.to_string())??;
+            pull_model_stream(&name).await
+        });
+        finish_progress(result.err());
+    });
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_model(name: String) -> Result<(), String> {
+    let response = http_client()
+        .delete(format!("{OLLAMA_BASE_URL}/api/delete"))
+        .json(&json!({ "model": name }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("Could not delete {name} ({}).", response.status()))
+    }
 }
 
 fn start_local_ai(app: AppHandle) {
     std::thread::spawn(move || {
-        if !ollama_reachable() {
-            let Some(path) = find_ollama(&app) else { return };
-            let mut command = Command::new(path);
-            command
-                .arg("serve")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                command.creation_flags(0x0800_0000);
-            }
-            match command.spawn() {
-                Ok(child) => {
-                    if let Ok(mut slot) = OLLAMA_CHILD.lock() {
-                        *slot = Some(child);
-                    }
-                }
-                Err(_) => return,
-            }
-            let mut ready = false;
-            for _ in 0..30 {
-                std::thread::sleep(Duration::from_millis(500));
-                if ollama_reachable() {
-                    ready = true;
-                    break;
-                }
-            }
-            if !ready {
-                return;
-            }
+        if find_ollama(&app).is_none() && !ollama_reachable() {
+            return;
         }
-
+        if let Err(error) = ensure_server(&app) {
+            finish_progress(Some(error));
+            return;
+        }
         let tags = tauri::async_runtime::block_on(get_ollama_tags()).ok();
         let model = match tags.as_ref().and_then(|t| t.models.first()) {
             Some(first) => first.name.clone(),
             None => {
-                // First run: fetch the default model once (no timeout, it is several GB).
-                let pulled = tauri::async_runtime::block_on(async {
-                    reqwest::Client::new()
-                        .post(format!("{OLLAMA_BASE_URL}/api/pull"))
-                        .json(&json!({ "model": DEFAULT_LOCAL_MODEL, "stream": false }))
-                        .send()
-                        .await
-                        .map(|r| r.status().is_success())
-                        .unwrap_or(false)
-                });
-                if !pulled {
+                if progress_busy() {
+                    return;
+                }
+                set_progress(&format!("Downloading {DEFAULT_LOCAL_MODEL}"), -1.0);
+                let result = tauri::async_runtime::block_on(pull_model_stream(DEFAULT_LOCAL_MODEL));
+                let failed = result.is_err();
+                finish_progress(result.err());
+                if failed {
                     return;
                 }
                 DEFAULT_LOCAL_MODEL.to_string()

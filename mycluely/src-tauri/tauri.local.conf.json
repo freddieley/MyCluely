@@ -1,0 +1,6 @@
+{
+  "productName": "Vela Local",
+  "bundle": {
+    "resources": ["resources/speech/**/*", "resources/ollama/**/*"]
+  }
+}

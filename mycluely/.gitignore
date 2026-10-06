@@ -25,3 +25,6 @@ dist-ssr
 
 # Downloaded by scripts/fetch-speech-assets.ps1
 src-tauri/resources/speech/
+
+# Downloaded by scripts/fetch-ollama.ps1
+src-tauri/resources/ollama/
