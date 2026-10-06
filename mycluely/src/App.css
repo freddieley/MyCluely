@@ -1542,3 +1542,20 @@ button {
 .kbd-set{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;color:#888}
 kbd{display:inline-block;margin-right:3px;padding:1px 6px;border-radius:5px;font:600 11px ui-monospace,Consolas,monospace;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.16);border-bottom-width:2px;color:#f0f0f5}
 .shortcuts-card{scrollbar-width:none}.shortcuts-card::-webkit-scrollbar{display:none}
+.local-model-setup .key-entry { margin-top: 4px; }
+.local-model-setup .save-key-button,
+.local-model-setup .remove-key-button { padding: 8px 12px; }
+.model-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.model-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.19);
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 10px;
+}
+.save-key-button:disabled { opacity: 0.45; cursor: default; }

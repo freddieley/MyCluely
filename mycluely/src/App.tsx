@@ -1640,16 +1640,16 @@ function App() {
                   {localSetup?.progress?.error && !localSetup.progress.active && <p className="credential-status" role="alert">{localSetup.progress.error}</p>}
                   {(localSetup?.installed || localSetup?.running) && (
                     <>
-                      <div className="local-model-row">
+                      <div className="key-entry">
                         <input type="text" placeholder="Get a model, e.g. llama3.2:3b" value={pullName} onChange={(event) => setPullName(event.target.value)} />
                         <button type="button" className="save-key-button" disabled={!pullName.trim() || Boolean(localSetup?.progress?.active)} onClick={() => { void startLocalAction("pull_model", { name: pullName.trim() }); setPullName(""); }}>Install</button>
                       </div>
-                      {localAiStatus?.models.map((model) => (
-                        <div className="local-model-row" key={model.name}>
-                          <span>{model.name}</span>
-                          <button type="button" className="save-key-button" onClick={() => void removeModel(model.name)}>Delete</button>
+                      <div className="model-list">{localAiStatus?.models.map((model) => (
+                        <div className="model-item" key={model.name}>
+                          <span>{model.name}{model.vision ? " · vision" : ""}</span>
+                          <button type="button" className="remove-key-button" onClick={() => void removeModel(model.name)}>Delete</button>
                         </div>
-                      ))}
+                      ))}</div>
                     </>
                   )}
                 </div>                {localStatusMessage && <p className="credential-status" role="status">{localStatusMessage}</p>}
