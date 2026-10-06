@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+mod netguard;
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -33,15 +35,12 @@ fn http_client() -> &'static reqwest::Client {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_blocked_host, parse_tool_call, percent_decode, strip_tags, validate_privacy_provider};
+    use super::{parse_tool_call, percent_decode, strip_tags, validate_privacy_provider};
 
     #[test]
     fn tool_helpers_work() {
         assert_eq!(percent_decode("a%20b%2Fc+d%é"), "a b/c d%é");
         assert_eq!(strip_tags("<p>Hi <b>there</b></p>").trim(), "Hi there");
-        assert!(is_blocked_host("localhost"));
-        assert!(is_blocked_host("192.168.1.5"));
-        assert!(!is_blocked_host("example.com"));
         let (n, a) = parse_tool_call("<tool>{\"name\":\"web_search\",\"args\":{\"query\":\"x\"}}</tool>").unwrap();
         assert_eq!(n, "web_search");
         assert_eq!(a["query"], "x");
@@ -953,7 +952,7 @@ async fn send_chat_message(
             _ => format!("Using {name}"),
         };
         let _ = on_tool.send(label);
-        let result = run_tool(name.clone(), args, full_privacy)
+        let result = execute_tool(&name, &args)
             .await
             .unwrap_or_else(|error| format!("Tool error: {error}"));
         let result: String = result.chars().take(9_000).collect();
@@ -989,7 +988,6 @@ pub fn run() {
             synthesize_speech,
             transcribe_audio,
             send_chat_message,
-            run_tool,
             get_local_ai_setup,
             install_local_ai,
             pull_model,
@@ -1441,22 +1439,6 @@ fn remove_blocks(html: &str, tag: &str) -> String {
     out
 }
 
-fn is_blocked_host(host: &str) -> bool {
-    let host = host.to_ascii_lowercase();
-    if host == "localhost" || host.ends_with(".local") || host.ends_with(".internal") {
-        return true;
-    }
-    if let Ok(ip) = host.trim_matches(|c| c == '[' || c == ']').parse::<std::net::IpAddr>() {
-        return match ip {
-            std::net::IpAddr::V4(v4) => {
-                v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
-            }
-            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
-        };
-    }
-    false
-}
-
 async fn tool_web_search(query: &str) -> Result<String, String> {
     if query.trim().is_empty() || query.len() > 300 {
         return Err("Search query must be 1-300 characters.".to_string());
@@ -1491,40 +1473,50 @@ async fn tool_web_search(query: &str) -> Result<String, String> {
             .map(|(_, rest)| strip_tags(rest.split("</a>").next().unwrap_or("")))
             .unwrap_or_default();
         if url.starts_with("http") && !title.is_empty() {
-            results.push(format!("{}. {}\n{}\n{}", results.len() + 1, title, url, snippet));
+            let source = reqwest::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+            results.push(json!({ "title": title, "url": url, "source": source, "snippet": snippet }));
         }
     }
-    if results.is_empty() {
-        return Ok("No results found.".to_string());
-    }
-    Ok(results.join("\n\n"))
+    Ok(json!({ "query": query, "results": results }).to_string())
 }
 
+const MAX_PAGE_BYTES: usize = 2_000_000;
+
 async fn tool_fetch_url(url: &str) -> Result<String, String> {
-    let parsed = reqwest::Url::parse(url).map_err(|_| "Invalid URL.".to_string())?;
-    if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return Err("Only http and https URLs can be fetched.".to_string());
-    }
-    if parsed.host_str().map_or(true, is_blocked_host) {
-        return Err("That address isn't allowed.".to_string());
-    }
-    let response = http_client()
-        .get(parsed)
-        .header("User-Agent", "Mozilla/5.0 (compatible; Vela/0.1)")
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|error| format!("Couldn't fetch the page: {error}"))?;
+    let (mut response, final_url) = netguard::guarded_get(url, WEB_USER_AGENT, Duration::from_secs(15)).await?;
     if !response.status().is_success() {
         return Err(format!("The page returned {}.", response.status()));
     }
-    let html = response
-        .text()
-        .await
-        .map_err(|error| format!("Couldn't read the page: {error}"))?;
-    let html = remove_blocks(&remove_blocks(&remove_blocks(&html, "script"), "style"), "noscript");
-    let text = strip_tags(&html);
-    Ok(text.chars().take(5_000).collect())
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| "Couldn't read the page.".to_string())? {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() >= MAX_PAGE_BYTES {
+            break;
+        }
+    }
+    let html = String::from_utf8_lossy(&bytes).into_owned();
+    Ok(page_result(&html, &final_url, 5_000))
+}
+
+const WEB_USER_AGENT: &str = "Mozilla/5.0 (compatible; Vela/0.1)";
+
+fn page_result(html: &str, base: &reqwest::Url, limit: usize) -> String {
+    let title = html
+        .split_once("<title")
+        .and_then(|(_, r)| r.split_once('>'))
+        .map(|(_, r)| decode_entities(r.split("</title>").next().unwrap_or("").trim()))
+        .unwrap_or_default();
+    let links = extract_links(html, base);
+    let cleaned = remove_blocks(&remove_blocks(&remove_blocks(&remove_blocks(html, "script"), "style"), "noscript"), "svg");
+    let text: String = strip_tags(&cleaned).chars().take(limit).collect();
+    json!({
+        "title": title,
+        "source": base.host_str().unwrap_or_default(),
+        "url": base.as_str(),
+        "text": text,
+        "links": links,
+    })
+    .to_string()
 }
 
 fn find_browser() -> Option<PathBuf> {
@@ -1543,8 +1535,8 @@ fn find_browser() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
-fn extract_links(html: &str, base: &reqwest::Url) -> Vec<String> {
-    let mut links: Vec<String> = Vec::new();
+fn extract_links(html: &str, base: &reqwest::Url) -> Vec<Value> {
+    let mut links: Vec<Value> = Vec::new();
     for chunk in html.split("<a ").skip(1) {
         if links.len() >= 25 {
             break;
@@ -1554,7 +1546,7 @@ fn extract_links(html: &str, base: &reqwest::Url) -> Vec<String> {
         let label = strip_tags(rest.split("</a>").next().unwrap_or(""));
         let Ok(url) = base.join(&decode_entities(href)) else { continue };
         if (url.scheme() == "http" || url.scheme() == "https") && label.len() > 3 {
-            let entry = format!("- {} ({})", label.chars().take(80).collect::<String>(), url);
+            let entry = json!({ "label": label.chars().take(80).collect::<String>(), "url": url.as_str() });
             if !links.contains(&entry) {
                 links.push(entry);
             }
@@ -1563,20 +1555,28 @@ fn extract_links(html: &str, base: &reqwest::Url) -> Vec<String> {
     links
 }
 
+static BROWSER_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+static BROWSE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 async fn tool_browse_page(url: &str) -> Result<String, String> {
-    let parsed = reqwest::Url::parse(url).map_err(|_| "Invalid URL.".to_string())?;
-    if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return Err("Only http and https URLs can be browsed.".to_string());
-    }
-    if parsed.host_str().map_or(true, is_blocked_host) {
-        return Err("That address isn't allowed.".to_string());
-    }
-    let Some(browser) = find_browser() else {
-        // No installed Chromium-based browser: fall back to a plain fetch.
+    let parsed = netguard::validate_url(url)?;
+    // Plain http can't go through the CONNECT-only proxy, and without a browser we fall back too.
+    let Some(browser) = find_browser().filter(|_| parsed.scheme() == "https") else {
         return tool_fetch_url(url).await;
     };
-    let profile = std::env::temp_dir().join(format!("vela-browse-{}", std::process::id()));
+    netguard::resolve_public(&parsed).await?;
+    let _slot = BROWSER_SLOTS
+        .try_acquire()
+        .map_err(|_| "Vela is already busy browsing. Try again in a moment.".to_string())?;
+    let proxy = netguard::BrowserProxy::start().await?;
+    let profile = std::env::temp_dir().join(format!(
+        "vela-browse-{}-{}",
+        std::process::id(),
+        BROWSE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
     let target = parsed.to_string();
+    let port = proxy.port;
+    let cleanup_profile = profile.clone();
     let output = tauri::async_runtime::spawn_blocking(move || {
         let mut command = Command::new(browser);
         command
@@ -1587,6 +1587,8 @@ async fn tool_browse_page(url: &str) -> Result<String, String> {
             .arg("--mute-audio")
             .arg("--window-size=1280,2000")
             .arg("--virtual-time-budget=10000")
+            .arg(format!("--proxy-server=http://127.0.0.1:{port}"))
+            .arg("--proxy-bypass-list=<-loopback>")
             .arg("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
             .arg(format!("--user-data-dir={}", profile.display()))
             .arg("--dump-dom")
@@ -1604,7 +1606,7 @@ async fn tool_browse_page(url: &str) -> Result<String, String> {
         std::thread::spawn(move || {
             let _ = tx.send(child.wait_with_output());
         });
-        let result = match rx.recv_timeout(Duration::from_secs(40)) {
+        match rx.recv_timeout(Duration::from_secs(40)) {
             Ok(out) => out.map_err(|e| e.to_string()),
             Err(_) => {
                 #[cfg(windows)]
@@ -1613,26 +1615,18 @@ async fn tool_browse_page(url: &str) -> Result<String, String> {
                 let _ = Command::new("kill").args(["-9", &id.to_string()]).output();
                 Err("The page took too long to load.".to_string())
             }
-        };
-        let _ = fs::remove_dir_all(&profile);
-        result
+        }
     })
-    .await
-    .map_err(|e| e.to_string())??;
+    .await;
+    drop(proxy);
+    let _ = fs::remove_dir_all(&cleanup_profile);
+    let output = output.map_err(|e| e.to_string())??;
 
     let html = String::from_utf8_lossy(&output.stdout).into_owned();
     if html.trim().is_empty() {
         return tool_fetch_url(url).await;
     }
-    let links = extract_links(&html, &parsed);
-    let cleaned = remove_blocks(&remove_blocks(&remove_blocks(&remove_blocks(&html, "script"), "style"), "noscript"), "svg");
-    let text: String = strip_tags(&cleaned).chars().take(6_500).collect();
-    let mut out = format!("Page text:\n{text}");
-    if !links.is_empty() {
-        out.push_str("\n\nLinks:\n");
-        out.push_str(&links.join("\n"));
-    }
-    Ok(out)
+    Ok(page_result(&html, &parsed, 6_500))
 }
 
 fn utc_now_string() -> String {
@@ -1657,14 +1651,24 @@ fn utc_now_string() -> String {
     format!("{year:04}-{month:02}-{day:02} {:02}:{:02} UTC", rem / 3600, rem % 3600 / 60)
 }
 
-#[tauri::command]
-async fn run_tool(name: String, args: Value, full_privacy: bool) -> Result<String, String> {
-    let _ = full_privacy;
-    match name.as_str() {
-        "web_search" => tool_web_search(args["query"].as_str().unwrap_or("")).await,
-        "fetch_url" => tool_fetch_url(args["url"].as_str().unwrap_or("")).await,
-        "browse_page" => tool_browse_page(args["url"].as_str().unwrap_or("")).await,
-        "get_datetime" => Ok(utc_now_string()),
+fn require_str<'a>(args: &'a Value, key: &str, max: usize) -> Result<&'a str, String> {
+    let object = args.as_object().ok_or_else(|| "Tool arguments must be an object.".to_string())?;
+    if object.len() != 1 || !object.contains_key(key) {
+        return Err(format!("This tool takes exactly one argument: '{key}'."));
+    }
+    let value = object[key].as_str().ok_or_else(|| format!("'{key}' must be a string."))?.trim();
+    if value.is_empty() || value.len() > max {
+        return Err(format!("'{key}' must be 1-{max} characters."));
+    }
+    Ok(value)
+}
+
+async fn execute_tool(name: &str, args: &Value) -> Result<String, String> {
+    match name {
+        "web_search" => tool_web_search(require_str(args, "query", 300)?).await,
+        "fetch_url" => tool_fetch_url(require_str(args, "url", 2048)?).await,
+        "browse_page" => tool_browse_page(require_str(args, "url", 2048)?).await,
+        "get_datetime" => Ok(json!({ "utc": utc_now_string() }).to_string()),
         _ => Err(format!("Unknown tool '{name}'.")),
     }
 }

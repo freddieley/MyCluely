@@ -27,13 +27,17 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
-      "resources": ["resources/speech/**/*"],
+    "targets": [
+      "nsis"
+    ],
+    "resources": [
+      "resources/speech/**/*"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

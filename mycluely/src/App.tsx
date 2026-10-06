@@ -807,8 +807,7 @@ function App() {
           },
         );
 
-        console.log(`Vela hotkey registered: ${HOTKEY}`);
-      } catch (error) {
+        } catch (error) {
         console.error(
           "Failed to register Vela hotkey:",
           error,
@@ -1756,8 +1755,9 @@ function App() {
                             ? <div className="md"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children }) => (
                               <a href={href} target="_blank" rel="noreferrer" onClick={(event) => {
                                 event.preventDefault();
-                                if (href && isTauri()) void import("@tauri-apps/plugin-opener").then((m) => m.openUrl(href));
-                                else if (href) window.open(href, "_blank");
+                                if (!href || !/^https?:\/\//i.test(href)) return;
+                                if (isTauri()) void import("@tauri-apps/plugin-opener").then((m) => m.openUrl(href));
+                                else window.open(href, "_blank", "noopener,noreferrer");
                               }}>{children}</a>
                             ) }}>{message.content}</ReactMarkdown></div>
                             : <p>{message.content}</p>}
