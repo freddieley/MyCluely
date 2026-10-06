@@ -35,7 +35,7 @@ fn http_client() -> &'static reqwest::Client {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_tool_call, percent_decode, strip_tags, validate_privacy_provider};
+    use super::{parse_tool_call, percent_decode, resolve_privacy, strip_tags, validate_privacy_provider};
 
     #[test]
     fn tool_helpers_work() {
@@ -54,6 +54,19 @@ mod tests {
     #[test]
     fn full_privacy_allows_local_provider() {
         assert!(validate_privacy_provider("local", true).is_ok());
+    }
+
+    #[test]
+    fn strict_local_forces_private_and_disables_tools() {
+        assert_eq!(resolve_privacy(false, true, true), (true, false));
+        assert_eq!(resolve_privacy(true, false, true), (true, true));
+        assert_eq!(resolve_privacy(false, false, false), (false, false));
+    }
+
+    #[test]
+    fn strict_local_rejects_cloud_provider() {
+        let (private, _) = resolve_privacy(false, true, true);
+        assert!(validate_privacy_provider("openai", private).is_err());
     }
 
     #[test]
@@ -453,9 +466,14 @@ async fn get_local_ai_status() -> LocalAiStatus {
     }
 }
 
+// Strict Local Mode implies Private Mode and disables every network tool.
+fn resolve_privacy(full_privacy: bool, strict_local: bool, web_tools: bool) -> (bool, bool) {
+    (full_privacy || strict_local, web_tools && !strict_local)
+}
+
 fn validate_privacy_provider(provider: &str, full_privacy: bool) -> Result<(), String> {
     if full_privacy && provider != "local" {
-        return Err("Full Privacy Mode only permits local processing.".to_string());
+        return Err("Private Mode only permits on-device processing.".to_string());
     }
     Ok(())
 }
@@ -772,7 +790,7 @@ async fn chat_round(
             })
             .await
         }
-        "openai" if full_privacy => Err("Full Privacy Mode blocked a cloud request.".to_string()),
+        "openai" if full_privacy => Err("Private Mode blocked a cloud request.".to_string()),
         "openai" => {
             let api_key = get_api_key()?;
             let mut request_messages = vec![json!({
@@ -925,10 +943,12 @@ async fn send_chat_message(
     full_privacy: bool,
     screen_image: Option<String>,
     web_tools: bool,
+    strict_local: bool,
     on_delta: Channel<String>,
     on_tool: Channel<String>,
 ) -> Result<String, String> {
-    let tools_on = web_tools;
+    let (full_privacy, tools_on) = resolve_privacy(full_privacy, strict_local, web_tools);
+    validate_privacy_provider(&provider, full_privacy)?;
     if !tools_on {
         let mut sink = Sink::new(&on_delta, false);
         return chat_round(&messages, &personality, &provider, &model, full_privacy, screen_image, "", &mut sink).await;

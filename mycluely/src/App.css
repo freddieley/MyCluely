@@ -1559,3 +1559,9 @@ kbd{display:inline-block;margin-right:3px;padding:1px 6px;border-radius:5px;font
   font-size: 10px;
 }
 .save-key-button:disabled { opacity: 0.45; cursor: default; }
+.recording-banner{position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:60;display:flex;align-items:center;gap:8px;padding:6px 14px;border-radius:999px;background:rgba(120,20,30,.92);color:#fff;font-size:12px;box-shadow:0 4px 18px rgba(0,0,0,.35)}
+.rec-dot{width:9px;height:9px;border-radius:50%;background:#ff4d5e;animation:rec-pulse 1.2s ease-in-out infinite}
+@keyframes rec-pulse{50%{opacity:.35}}
+.hotkey-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+.hotkey-row select{background:rgba(255,255,255,.06);color:inherit;border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:5px 8px}
+.onboarding kbd{padding:1px 6px;border-radius:5px;border:1px solid rgba(255,255,255,.25);font-size:12px}

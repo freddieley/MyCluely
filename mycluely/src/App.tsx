@@ -35,7 +35,8 @@ type LocalAiStatus = {
   error: string | null;
 };
 
-const HOTKEY = "CommandOrControl+Shift+Space";
+const DEFAULT_HOTKEY = "CommandOrControl+Shift+Space";
+const HOTKEY_CHOICES = ["CommandOrControl+Shift+Space", "CommandOrControl+Alt+Space", "CommandOrControl+Shift+V", "Alt+Space"];
 const SHORTCUT_GROUPS: { group: string; items: [string, string][] }[] = [
   {
     group: "Anywhere (global)",
@@ -168,6 +169,21 @@ function App() {
   const [fullPrivacy, setFullPrivacy] = useState(
     () => window.localStorage.getItem("vela.fullPrivacy") === "true",
   );
+  const [strictLocal, setStrictLocal] = useState(
+    () => window.localStorage.getItem("vela.strictLocal") === "true",
+  );
+  const [hotkey, setHotkey] = useState(
+    () => window.localStorage.getItem("vela.hotkey") ?? DEFAULT_HOTKEY,
+  );
+  const [hotkeyError, setHotkeyError] = useState("");
+  const [onboarded, setOnboarded] = useState(
+    () => window.localStorage.getItem("vela.onboarded") === "true",
+  );
+  const [recordingConsent, setRecordingConsent] = useState(
+    () => window.localStorage.getItem("vela.recordingConsent") === "true",
+  );
+  const [consentPrompt, setConsentPrompt] = useState(false);
+  const startMeetingCaptureRef = useRef<() => Promise<void>>(async () => {});
   const [localAiStatus, setLocalAiStatus] = useState<LocalAiStatus | null>(null);
   const [localModel, setLocalModel] = useState(
     () => window.localStorage.getItem("vela.model") ?? "",
@@ -796,8 +812,9 @@ function App() {
 
     const setupHotkey = async () => {
       try {
+        setHotkeyError("");
         await register(
-          HOTKEY,
+          hotkey,
           async () => {
             if (!mounted) {
               return;
@@ -808,10 +825,10 @@ function App() {
         );
 
         } catch (error) {
-        console.error(
-          "Failed to register Vela hotkey:",
-          error,
-        );
+        console.error("Failed to register Vela hotkey:", error);
+        if (mounted) {
+          setHotkeyError(`Vela couldn't claim ${hotkey}. Another app may be using it. Pick a different shortcut in Settings > General.`);
+        }
       }
     };
 
@@ -820,7 +837,7 @@ function App() {
     return () => {
       mounted = false;
 
-      unregister(HOTKEY).catch(
+      unregister(hotkey).catch(
         (error) => {
           console.error(
             "Failed to unregister Vela hotkey:",
@@ -829,8 +846,11 @@ function App() {
         },
       );
 
-      void stopMicrophone(false);
     };
+  }, [hotkey]);
+
+  useEffect(() => () => {
+    void stopMicrophone(false);
   }, []);
 
   /*
@@ -1072,7 +1092,17 @@ function App() {
     }
   };
 
+  const chooseStrictLocal = (enabled: boolean) => {
+    setStrictLocal(enabled);
+    window.localStorage.setItem("vela.strictLocal", String(enabled));
+    if (enabled && !fullPrivacy) choosePrivacyMode(true);
+  };
+
   const choosePrivacyMode = (enabled: boolean) => {
+    if (!enabled && strictLocal) {
+      setStrictLocal(false);
+      window.localStorage.setItem("vela.strictLocal", "false");
+    }
     setFullPrivacy(enabled);
     window.localStorage.setItem("vela.fullPrivacy", String(enabled));
     if (enabled) {
@@ -1170,6 +1200,10 @@ function App() {
 
   const startMeetingCapture = async () => {
     if (!isTauri() || meetingCapture) return;
+    if (!recordingConsent) {
+      setConsentPrompt(true);
+      return;
+    }
     if (provider === "openai" && !apiKeyPresent) {
       setChatError("Add your OpenAI API key in Settings before transcribing a meeting.");
       return;
@@ -1307,7 +1341,8 @@ function App() {
         model: localModel,
         fullPrivacy,
         screenImage: screenImage ?? null,
-        webTools,
+        webTools: webTools && !strictLocal,
+        strictLocal,
         onDelta: stream,
         onTool: toolChannel,
       });
@@ -1351,6 +1386,9 @@ function App() {
         : copilotState === "thinking"
           ? "Thinking"
           : "Responding";
+
+  startMeetingCaptureRef.current = startMeetingCapture;
+  const recordingActive = copilotState === "listening" || meetingCapture;
 
   return (
     <main
@@ -1558,7 +1596,50 @@ function App() {
         </div>
       </section>
 
-      {expanded && (
+      {recordingActive && (
+        <div className="recording-banner" role="status">
+          <span className="rec-dot" aria-hidden="true" />
+          <strong>RECORDING</strong>
+          <span>{meetingCapture ? "Capturing meeting audio. Use Stop capture to end it." : `Listening to your microphone. Press ${hotkey.replace("CommandOrControl", "Ctrl")} to stop.`}</span>
+        </div>
+      )}
+      {expanded && !onboarded && (
+        <section className="assistant-panel" aria-label="Welcome to Vela">
+          <div className="settings-page onboarding">
+            <div className="panel-heading">
+              <div className="eyebrow">WELCOME</div>
+              <h1>Meet Vela.</h1>
+              <p>Your keyboard-first assistant that floats above everything.</p>
+            </div>
+            <div className="provider-card">
+              <p className="provider-copy"><strong>Your shortcut:</strong> press <kbd>{hotkey.replace("CommandOrControl", "Ctrl")}</kbd> from any app to start or stop voice capture. Press <kbd>Ctrl</kbd> <kbd>/</kbd> any time to see every shortcut.</p>
+              <p className="provider-copy">Choose where Vela thinks in Settings: Cloud with your own OpenAI key, or On-device AI that runs on this PC. Vela is available for Windows only.</p>
+              {hotkeyError && <p className="credential-status" role="alert">{hotkeyError}</p>}
+            </div>
+            <button type="button" className="back-to-chat" onClick={() => { window.localStorage.setItem("vela.onboarded", "true"); setOnboarded(true); }}>
+              Got it <span aria-hidden="true">&rarr;</span>
+            </button>
+          </div>
+        </section>
+      )}
+      {consentPrompt && (
+        <div className="shortcuts-overlay" role="dialog" aria-label="Recording consent" onClick={() => setConsentPrompt(false)}>
+          <div className="shortcuts-card" onClick={(event) => event.stopPropagation()}>
+            <div className="shortcuts-head"><strong>Before you record a meeting</strong></div>
+            <p className="provider-copy">Recording or transcribing other people may require their consent where you live. You are responsible for informing participants and following local law and your organization's policies. Vela does not store audio; transcripts stay in this session unless you keep them.</p>
+            <div className="key-entry">
+              <button type="button" className="save-key-button" onClick={() => {
+                window.localStorage.setItem("vela.recordingConsent", "true");
+                setRecordingConsent(true);
+                setConsentPrompt(false);
+                window.setTimeout(() => void startMeetingCaptureRef.current(), 0);
+              }}>I understand, start</button>
+              <button type="button" className="remove-key-button" onClick={() => setConsentPrompt(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {expanded && onboarded && (
         <section className="assistant-panel" aria-label="Vela assistant">
           {settingsOpen ? (
             <div className="settings-page">
@@ -1596,17 +1677,21 @@ function App() {
                     <strong>Cloud</strong><span>OpenAI API</span>
                   </button>
                   <button type="button" className={provider === "local" ? "selected" : ""} onClick={() => chooseProvider("local")} aria-pressed={provider === "local"}>
-                    <strong>On-device</strong><span>Ollama</span>
+                    <strong>On-device AI</strong><span>Ollama</span>
                   </button>
                 </div>
                 <label className="privacy-toggle">
                   <input type="checkbox" checked={fullPrivacy} onChange={(event) => choosePrivacyMode(event.target.checked)} />
-                  <span><strong>Full Privacy Mode</strong><small>Block all cloud chat and transcription. Uses local Ollama plus Vela's built-in speech models.</small></span>
+                  <span><strong>Private Mode</strong><small>Chat and transcription run on this device (no cloud AI). If web access is on, search queries and page requests still go to the internet.</small></span>
+                </label>
+                <label className="privacy-toggle">
+                  <input type="checkbox" checked={strictLocal} onChange={(event) => chooseStrictLocal(event.target.checked)} />
+                  <span><strong>Strict Local Mode</strong><small>Private Mode plus no web access. Vela's AI features send nothing over the network.</small></span>
                 </label>
                 {provider === "local" && (
                   <div className="local-model-setup">
                     <div className="local-model-row">
-                      <label htmlFor="local-model">Local model</label>
+                      <label htmlFor="local-model">On-device model</label>
                       <select id="local-model" value={localModel} onChange={(event) => {
                         setLocalModel(event.target.value);
                         window.localStorage.setItem("vela.model", event.target.value);
@@ -1627,8 +1712,8 @@ function App() {
                 <div className="local-model-setup">
                   {localSetup && !localSetup.installed && !localSetup.running && (
                     <>
-                      <p className="provider-copy">Run Vela offline: install the local AI engine and {localSetup.defaultModel} (about 2.5 GB download).</p>
-                      <button type="button" className="save-key-button" disabled={Boolean(localSetup.progress?.active)} onClick={() => void startLocalAction("install_local_ai")}>Install local AI</button>
+                      <p className="provider-copy">Run Vela on this PC: install the on-device AI engine and {localSetup.defaultModel} (about 2.5 GB download).</p>
+                      <button type="button" className="save-key-button" disabled={Boolean(localSetup.progress?.active)} onClick={() => void startLocalAction("install_local_ai")}>Install On-device AI</button>
                     </>
                   )}
                   {localSetup?.progress?.active && (
@@ -1665,7 +1750,7 @@ function App() {
                     {apiKeyPresent ? "Connected" : "Not connected"}
                   </span>
                 </div>
-                <p className="provider-copy">Your key stays in your system keychain. Cloud chat and transcription are sent to OpenAI only when Cloud is selected; screen images are attached only when you enable screen context.</p>
+                <p className="provider-copy">Your key stays in your system keychain. Cloud chat and transcription are sent to OpenAI only when Cloud is selected. If you turn on screen context in Cloud mode, the screenshot is sent to OpenAI with your message. Vela never saves screenshots to disk.</p>
                 <div className="key-entry">
                   <input
                     type="password"
@@ -1692,6 +1777,16 @@ function App() {
                 </div>
                 <div className="provider-card feature-settings">
                   <div className="eyebrow">YOUR FLOW</div>
+                  <div className="hotkey-row">
+                    <label htmlFor="hotkey-select"><strong>Voice shortcut</strong></label>
+                    <select id="hotkey-select" value={hotkey} onChange={(event) => {
+                      setHotkey(event.target.value);
+                      window.localStorage.setItem("vela.hotkey", event.target.value);
+                    }}>
+                      {HOTKEY_CHOICES.map((choice) => <option key={choice} value={choice}>{choice.replace("CommandOrControl", "Ctrl")}</option>)}
+                    </select>
+                  </div>
+                  {hotkeyError && <p className="credential-status" role="alert">{hotkeyError}</p>}
                   <label className="privacy-toggle">
                     <input type="checkbox" checked={alwaysOnTop} onChange={(event) => setAlwaysOnTop(event.target.checked)} />
                     <span><strong>Keep the Vela bar on top</strong><small>Pin the floating assistant above other windows.</small></span>
@@ -1702,14 +1797,14 @@ function App() {
                       window.localStorage.setItem("vela.speakReplies", String(event.target.checked));
                       if (!event.target.checked) window.speechSynthesis?.cancel();
                     }} />
-                    <span><strong>Speak replies aloud</strong><small>Uses system voices. Full Privacy Mode only uses voices marked local by your system. Use Stop speaking to silence a reply.</small></span>
+                    <span><strong>Speak replies aloud</strong><small>Uses system voices. Private Mode only uses voices marked local by your system. Use Stop speaking to silence a reply.</small></span>
                   </label>
                   <label className="privacy-toggle">
-                    <input type="checkbox" checked={webTools} onChange={(event) => {
+                    <input type="checkbox" checked={webTools && !strictLocal} disabled={strictLocal} onChange={(event) => {
                       setWebTools(event.target.checked);
                       window.localStorage.setItem("vela.webTools", String(event.target.checked));
                     }} />
-                    <span><strong>Web access</strong><small>{fullPrivacy ? "Allowed in Full Privacy Mode. Only search queries and page requests leave your device; the model stays local." : "Lets Vela search the web and browse pages in a real headless browser, following links like a person."}</small></span>
+                    <span><strong>Web access</strong><small>{strictLocal ? "Disabled by Strict Local Mode." : fullPrivacy ? "The model stays on this device, but search queries and page requests are sent to the websites involved." : "Lets Vela search the web and browse pages in a real headless browser, following links like a person."}</small></span>
                   </label>
                   <button type="button" className="remove-key-button" onClick={() => window.speechSynthesis?.cancel()}>Stop speaking</button>
                 </div>
@@ -1717,6 +1812,7 @@ function App() {
                   <p className="credential-status" role="status">{credentialStatus}</p>
                 )}
               </div>
+              <p className="provider-copy">Vela is available for Windows only. Screen context is captured only when you turn it on and is never saved to disk.</p>
               <button type="button" className="remove-key-button" onClick={() => setShortcutsOpen(true)}>Keyboard shortcuts (Ctrl+/)</button>
               <button type="button" className="back-to-chat" onClick={() => void openPanel("chat")}>
                 Back to chat <span aria-hidden="true">→</span>
@@ -1840,7 +1936,7 @@ function App() {
                   </button>
                 </div>
                 <div className="composer-footer">
-                  <span title="Keyboard shortcuts">Ctrl+/ shortcuts · {fullPrivacy ? "Full Privacy Mode · local model only" : provider === "local" ? "On-device · Ollama" : "Cloud · OpenAI"}{screenSharing ? " · Screen attached when you send" : ""}</span>
+                  <span title="Keyboard shortcuts">Ctrl+/ shortcuts · {strictLocal ? "Strict Local · no network" : fullPrivacy ? "Private Mode · on-device AI" : provider === "local" ? "On-device · Ollama" : "Cloud · OpenAI"}{screenSharing ? " · Screen attached when you send" : ""}</span>
                   {messages.length > 0 && (
                     <button
                       type="button"
