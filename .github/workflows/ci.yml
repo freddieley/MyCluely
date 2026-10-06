@@ -1,0 +1,24 @@
+﻿name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: mycluely
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mycluely/package-lock.json
+      - run: npm ci
+      - run: npx tsc -b
+      - run: npm run build
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+        working-directory: mycluely/src-tauri
