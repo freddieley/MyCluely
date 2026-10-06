@@ -162,7 +162,7 @@ async fn get_ollama_tags() -> Result<OllamaTags, String> {
         .send()
         .await
         .map_err(|_| {
-            "Ollama isn't running. Install Ollama and start it to use local models.".to_string()
+            "Vela's local engine is still starting (the first launch also downloads the default model). Try again in a moment.".to_string()
         })?;
 
     if !response.status().is_success() {
@@ -949,11 +949,116 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_always_on_top(true);
             }
+            start_local_ai(app.handle().clone());
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Vela");
+        .build(tauri::generate_context!())
+        .expect("error while building Vela")
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Some(mut child) = OLLAMA_CHILD.lock().ok().and_then(|mut c| c.take()) {
+                    let _ = child.kill();
+                }
+            }
+        });
+}
+
+// ---- Bundled Ollama: Vela starts its own Ollama server (MIT-licensed, redistributable) and loads the default model. ----
+
+const DEFAULT_LOCAL_MODEL: &str = "qwen3:4b";
+static OLLAMA_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+
+fn ollama_reachable() -> bool {
+    tauri::async_runtime::block_on(async {
+        http_client().get(format!("{OLLAMA_BASE_URL}/api/tags")).send().await.is_ok()
+    })
+}
+
+fn find_ollama(app: &AppHandle) -> Option<PathBuf> {
+    let exe = if cfg!(windows) { "ollama.exe" } else { "ollama" };
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(resources) = app.path().resource_dir() {
+        candidates.push(resources.join("ollama").join(exe));
+        candidates.push(resources.join("resources").join("ollama").join(exe));
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        candidates.push(PathBuf::from(local).join("Programs").join("Ollama").join(exe));
+    }
+    if let Some(found) = candidates.into_iter().find(|path| path.is_file()) {
+        return Some(found);
+    }
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths).map(|dir| dir.join(exe)).find(|path| path.is_file())
+    })
+}
+
+fn start_local_ai(app: AppHandle) {
+    std::thread::spawn(move || {
+        if !ollama_reachable() {
+            let Some(path) = find_ollama(&app) else { return };
+            let mut command = Command::new(path);
+            command
+                .arg("serve")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(0x0800_0000);
+            }
+            match command.spawn() {
+                Ok(child) => {
+                    if let Ok(mut slot) = OLLAMA_CHILD.lock() {
+                        *slot = Some(child);
+                    }
+                }
+                Err(_) => return,
+            }
+            let mut ready = false;
+            for _ in 0..30 {
+                std::thread::sleep(Duration::from_millis(500));
+                if ollama_reachable() {
+                    ready = true;
+                    break;
+                }
+            }
+            if !ready {
+                return;
+            }
+        }
+
+        let tags = tauri::async_runtime::block_on(get_ollama_tags()).ok();
+        let model = match tags.as_ref().and_then(|t| t.models.first()) {
+            Some(first) => first.name.clone(),
+            None => {
+                // First run: fetch the default model once (no timeout, it is several GB).
+                let pulled = tauri::async_runtime::block_on(async {
+                    reqwest::Client::new()
+                        .post(format!("{OLLAMA_BASE_URL}/api/pull"))
+                        .json(&json!({ "model": DEFAULT_LOCAL_MODEL, "stream": false }))
+                        .send()
+                        .await
+                        .map(|r| r.status().is_success())
+                        .unwrap_or(false)
+                });
+                if !pulled {
+                    return;
+                }
+                DEFAULT_LOCAL_MODEL.to_string()
+            }
+        };
+
+        // Warm-up: load the model into memory so the first reply is instant.
+        tauri::async_runtime::block_on(async {
+            let _ = reqwest::Client::new()
+                .post(format!("{OLLAMA_BASE_URL}/api/generate"))
+                .json(&json!({ "model": model, "keep_alive": "30m", "prompt": "" }))
+                .send()
+                .await;
+        });
+    });
 }
 
 // ---- Tools: a small registry the model can call. Skills/marketplace entries can add to this later. ----
