@@ -8,8 +8,10 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "build:cloud": "tauri build",
-    "build:local": "powershell -ExecutionPolicy Bypass -File scripts/fetch-ollama.ps1 && tauri build --config src-tauri/tauri.local.conf.json"
+    "assets": "powershell -ExecutionPolicy Bypass -File scripts/fetch-assets.ps1",
+    "assets:local": "powershell -ExecutionPolicy Bypass -File scripts/fetch-assets.ps1 -IncludeOllama",
+    "build:cloud": "npm run assets && tauri build",
+    "build:local": "powershell -ExecutionPolicy Bypass -File scripts/fetch-assets.ps1 -IncludeOllama && tauri build --config src-tauri/tauri.local.conf.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
