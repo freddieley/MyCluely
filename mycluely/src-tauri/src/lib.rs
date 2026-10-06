@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1174,20 +1174,19 @@ async fn pull_model_stream(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+// Keep in sync with scripts/assets.lock.json.
+const OLLAMA_URL: &str = "https://github.com/ollama/ollama/releases/download/v0.35.1/ollama-windows-amd64.zip";
+const OLLAMA_SHA256: &str = "dc50b9ca7f9023c86525012632cd1615b093d0407987444a7f62ecab617e8e93";
+
 async fn download_ollama(app: &AppHandle) -> Result<(), String> {
-    let asset = match std::env::consts::ARCH {
-        "aarch64" => "ollama-windows-arm64.zip",
-        _ => "ollama-windows-amd64.zip",
-    };
-    if !cfg!(windows) {
-        return Err("One-click install is only available on Windows. Install Ollama from ollama.com instead.".into());
+    if !cfg!(windows) || std::env::consts::ARCH != "x86_64" {
+        return Err("One-click install is only available on 64-bit Windows. Install Ollama from ollama.com instead.".into());
     }
     let dir = vela_dir(app);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let zip_path = dir.join("ollama-download.zip");
-    let url = format!("https://github.com/ollama/ollama/releases/latest/download/{asset}");
     let mut response = reqwest::Client::new()
-        .get(url)
+        .get(OLLAMA_URL)
         .send()
         .await
         .map_err(|e| format!("Could not download Ollama: {e}"))?;
@@ -1197,12 +1196,19 @@ async fn download_ollama(app: &AppHandle) -> Result<(), String> {
     let total = response.content_length().unwrap_or(0) as f64;
     let mut file = fs::File::create(&zip_path).map_err(|e| e.to_string())?;
     let mut done = 0.0;
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
     while let Some(chunk) = response.chunk().await.map_err(|e| format!("Download interrupted: {e}"))? {
+        sha2::Digest::update(&mut hasher, &chunk);
         std::io::Write::write_all(&mut file, &chunk).map_err(|e| e.to_string())?;
         done += chunk.len() as f64;
         set_progress("Downloading local AI engine", if total > 0.0 { done / total * 100.0 } else { -1.0 });
     }
     drop(file);
+    let digest = format!("{:x}", sha2::Digest::finalize(hasher));
+    if digest != OLLAMA_SHA256 {
+        let _ = fs::remove_file(&zip_path);
+        return Err("The downloaded engine failed its integrity check, so it was discarded. Please try again.".into());
+    }
     set_progress("Installing local AI engine", -1.0);
     let target = dir.join("ollama");
     let extract_path = zip_path.clone();
