@@ -35,7 +35,10 @@ fn http_client() -> &'static reqwest::Client {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_tool_call, percent_decode, resolve_privacy, strip_tags, validate_privacy_provider};
+    use super::{
+        parse_tool_call, percent_decode, resolve_privacy, strip_tags, strip_think_tags,
+        validate_privacy_provider, ThinkFilter,
+    };
 
     #[test]
     fn tool_helpers_work() {
@@ -72,6 +75,35 @@ mod tests {
     #[test]
     fn cloud_provider_is_allowed_when_full_privacy_is_off() {
         assert!(validate_privacy_provider("openai", false).is_ok());
+    }
+
+    #[test]
+    fn think_filter_hides_reasoning_across_stream_chunks() {
+        let mut filter = ThinkFilter::default();
+        let visible = ["Hello <thi", "nk>private reasoning</th", "ink> there"]
+        .into_iter()
+        .map(|chunk| filter.push(chunk))
+        .collect::<String>()
+            + &filter.finish();
+
+        assert_eq!(visible, "Hello  there");
+    }
+
+    #[test]
+    fn think_filter_drops_unclosed_reasoning() {
+        let mut filter = ThinkFilter::default();
+        let visible = filter.push("Answer<think>still private") + &filter.finish();
+
+        assert_eq!(visible, "Answer");
+        assert_eq!(strip_think_tags("Answer<think>still private"), "Answer");
+    }
+
+    #[test]
+    fn think_filter_preserves_non_think_text_and_case_insensitive_tags() {
+        assert_eq!(
+            strip_think_tags("Before<THINK>private</ThInK>After"),
+            "BeforeAfter"
+        );
     }
 }
 
@@ -674,6 +706,7 @@ where
     }
     handle(&buffer, &mut full)?;
     sink.finish();
+    let full = strip_think_tags(&full);
     if full.trim().is_empty() {
         return Err("The assistant returned an empty response. Try again.".to_string());
     }
@@ -869,28 +902,120 @@ async fn chat_round(
     }
 }
 
+#[derive(Default)]
+struct ThinkFilter {
+    buffered: String,
+    in_think: bool,
+}
+
+impl ThinkFilter {
+    fn push(&mut self, text: &str) -> String {
+        self.buffered.push_str(text);
+        self.drain(false)
+    }
+
+    fn finish(&mut self) -> String {
+        self.drain(true)
+    }
+
+    fn drain(&mut self, finishing: bool) -> String {
+        const OPEN: &str = "<think>";
+        const CLOSE: &str = "</think>";
+        let mut visible = String::new();
+
+        loop {
+            let lower = self.buffered.to_ascii_lowercase();
+            if self.in_think {
+                if let Some(index) = lower.find(CLOSE) {
+                    self.buffered.drain(..index + CLOSE.len());
+                    self.in_think = false;
+                    continue;
+                }
+                if finishing {
+                    self.buffered.clear();
+                    break;
+                }
+                let keep = trailing_tag_prefix_len(&self.buffered, CLOSE);
+                let cut = self.buffered.len() - keep;
+                self.buffered.drain(..cut);
+                break;
+            }
+
+            if let Some(index) = lower.find(OPEN) {
+                visible.push_str(&self.buffered[..index]);
+                self.buffered.drain(..index + OPEN.len());
+                self.in_think = true;
+                continue;
+            }
+            if finishing {
+                visible.push_str(&std::mem::take(&mut self.buffered));
+                break;
+            }
+
+            let keep = trailing_tag_prefix_len(&self.buffered, OPEN);
+            let cut = self.buffered.len() - keep;
+            visible.push_str(&self.buffered[..cut]);
+            self.buffered.drain(..cut);
+            break;
+        }
+
+        visible
+    }
+}
+
+fn trailing_tag_prefix_len(text: &str, tag: &str) -> usize {
+    (1..=tag.len().min(text.len()))
+        .rev()
+        .find(|length| {
+            let start = text.len() - length;
+            text.is_char_boundary(start) && text[start..].eq_ignore_ascii_case(&tag[..*length])
+        })
+        .unwrap_or(0)
+}
+
+fn strip_think_tags(text: &str) -> String {
+    let mut filter = ThinkFilter::default();
+    filter.push(text) + &filter.finish()
+}
+
 struct Sink<'a> {
     channel: &'a Channel<String>,
     guard: bool,
     held: String,
     decided: bool,
     is_tool: bool,
+    think_filter: ThinkFilter,
 }
 
 impl<'a> Sink<'a> {
     fn new(channel: &'a Channel<String>, guard: bool) -> Self {
-        Self { channel, guard, held: String::new(), decided: !guard, is_tool: false }
+        Self {
+            channel,
+            guard,
+            held: String::new(),
+            decided: !guard,
+            is_tool: false,
+            think_filter: ThinkFilter::default(),
+        }
     }
 
     fn push(&mut self, delta: String) {
+        let visible = self.think_filter.push(&delta);
+        self.push_visible(visible);
+    }
+
+    fn push_visible(&mut self, visible: String) {
+        if visible.is_empty() {
+            return;
+        }
         if !self.guard {
-            let _ = self.channel.send(delta);
+            let _ = self.channel.send(visible);
             return;
         }
         if self.is_tool {
             return;
         }
-        self.held.push_str(&delta);
+        self.held.push_str(&visible);
         if let Some(i) = self.held.find("<tool") {
             let before: String = self.held[..i].to_string();
             self.held.clear();
@@ -917,6 +1042,8 @@ impl<'a> Sink<'a> {
     }
 
     fn finish(&mut self) {
+        let visible = self.think_filter.finish();
+        self.push_visible(visible);
         if self.guard && !self.is_tool {
             let held = std::mem::take(&mut self.held);
             if !held.is_empty() {
