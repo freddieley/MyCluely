@@ -202,6 +202,51 @@ async fn model_supports_vision(model: &str) -> Result<bool, String> {
     Ok(vision_capability(&details))
 }
 
+// Sizes the context window and reply cap from free RAM and the model's own limits.
+async fn local_model_limits(model: &str) -> (u64, i64) {
+    let mut model_ctx: u64 = 8192;
+    let mut params_b: f64 = 4.0;
+    if let Ok(response) = http_client()
+        .post(format!("{OLLAMA_BASE_URL}/api/show"))
+        .json(&json!({ "model": model }))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+    {
+        if let Ok(details) = response.json::<Value>().await {
+            if let Some(info) = details["model_info"].as_object() {
+                if let Some(ctx) = info
+                    .iter()
+                    .find(|(key, _)| key.ends_with(".context_length"))
+                    .and_then(|(_, value)| value.as_u64())
+                {
+                    model_ctx = ctx;
+                }
+            }
+            if let Some(size) = details["details"]["parameter_size"]
+                .as_str()
+                .and_then(|text| text.trim_end_matches(['B', 'b']).parse::<f64>().ok())
+            {
+                params_b = size;
+            } else if let Some(size) = details["model_info"]["general.parameter_count"].as_f64() {
+                params_b = size / 1e9;
+            }
+        }
+    }
+
+    let mut system = System::new();
+    system.refresh_memory();
+    let available_gb = system.available_memory() as f64 / 1e9;
+    // Leave headroom for the OS and app, then subtract quantised weights.
+    let spare_gb = available_gb * 0.6 - params_b * 0.65;
+    let kv_gb_per_1k = (params_b * 0.04).max(0.02);
+    let affordable = (spare_gb / kv_gb_per_1k).max(0.0) as u64 * 1024;
+    let num_ctx = affordable.min(model_ctx).min(32768).max(4096.min(model_ctx));
+    let num_ctx = num_ctx / 1024 * 1024;
+    let num_predict = (num_ctx / 4).clamp(1024, 4096) as i64;
+    (num_ctx, num_predict)
+}
+
 fn speech_dir(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
     let relative = format!("resources/speech/{name}");
     let bundled = app
@@ -692,6 +737,7 @@ async fn chat_round(
                 request_messages.push(body);
             }
 
+            let (num_ctx, num_predict) = local_model_limits(&model).await;
             let response = http_client()
                 .post(format!("{OLLAMA_BASE_URL}/api/chat"))
                 .json(&json!({
@@ -699,8 +745,8 @@ async fn chat_round(
                     "messages": request_messages,
                     "stream": true,"think": false,"keep_alive": "10m",
                     "options": {
-                        "num_ctx": 8192,
-                        "num_predict": 2048,
+                        "num_ctx": num_ctx,
+                        "num_predict": num_predict,
                         "temperature": 0.65
                     }
                 }))
