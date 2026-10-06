@@ -1,4 +1,4 @@
-# Vela
+# Vela - AI that's there when you need it
 
 Vela is a personality-led desktop assistant built with Tauri, React, and TypeScript. Its floating bar can stay above other windows, and the assistant supports cloud and local inference, voice notes, optional screen context, meeting-audio transcription, and spoken replies.
 
