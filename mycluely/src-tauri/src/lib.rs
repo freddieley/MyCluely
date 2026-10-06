@@ -699,8 +699,8 @@ async fn chat_round(
                     "messages": request_messages,
                     "stream": true,"think": false,"keep_alive": "10m",
                     "options": {
-                        "num_ctx": 4096,
-                        "num_predict": 600,
+                        "num_ctx": 8192,
+                        "num_predict": 2048,
                         "temperature": 0.65
                     }
                 }))
@@ -770,7 +770,7 @@ async fn chat_round(
                     "model": "gpt-4o-mini",
                     "messages": request_messages,
                     "temperature": 0.7,
-                    "max_tokens": 700,
+                    "max_tokens": 2048,
                     "stream": true
                 }))
                 .send()
