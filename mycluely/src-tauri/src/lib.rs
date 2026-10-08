@@ -34,6 +34,19 @@ struct ConfirmationState {
     pending: std::sync::Mutex<Option<oneshot::Sender<bool>>>,
 }
 
+#[derive(Clone, Default)]
+struct ScreenCapture {
+    image: Option<String>,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Default)]
+struct ScreenContextState {
+    current: std::sync::Mutex<ScreenCapture>,
+    pending: std::sync::Mutex<Option<oneshot::Sender<ScreenCapture>>>,
+}
+
 fn cancellation_sender() -> &'static watch::Sender<bool> {
     CHAT_CANCELLATION.get_or_init(|| {
         let (sender, _) = watch::channel(false);
@@ -226,7 +239,7 @@ async fn get_ollama_tags() -> Result<OllamaTags, String> {
         .send()
         .await
         .map_err(|_| {
-            "Vela's local engine is still starting (the first launch also downloads the default model). Try again in a moment.".to_string()
+            "Cue's local engine is still starting. Try again in a moment.".to_string()
         })?;
 
     if !response.status().is_success() {
@@ -324,7 +337,7 @@ fn speech_dir(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
     if dev.is_dir() {
         return Ok(dev);
     }
-    Err("Vela's bundled speech models are missing. Run scripts/fetch-speech-assets.ps1 and rebuild.".to_string())
+    Err("Cue's bundled speech models are missing. Install the speech assets for this platform and rebuild.".to_string())
 }
 
 #[tauri::command]
@@ -397,13 +410,53 @@ fn start_window_drag(window: WebviewWindow) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn cancel_active_task(state: State<'_, ConfirmationState>) {
+fn cancel_active_task(
+    state: State<'_, ConfirmationState>,
+    screen: State<'_, ScreenContextState>,
+) {
     cancellation_sender().send_replace(true);
     if let Ok(mut pending) = state.pending.lock() {
         if let Some(sender) = pending.take() {
             let _ = sender.send(false);
         }
     }
+    if let Ok(mut pending) = screen.pending.lock() {
+        pending.take();
+    }
+}
+
+#[tauri::command]
+fn update_task_screen(
+    screen_image: String,
+    screen_width: u32,
+    screen_height: u32,
+    state: State<'_, ScreenContextState>,
+) -> Result<(), String> {
+    if screen_image.len() > 8_000_000
+        || !screen_image.starts_with("/9j/")
+        || screen_width == 0
+        || screen_height == 0
+        || screen_width > 20_000
+        || screen_height > 20_000
+    {
+        return Err("The screen snapshot isn't valid.".to_string());
+    }
+    let capture = ScreenCapture {
+        image: Some(screen_image),
+        width: screen_width,
+        height: screen_height,
+    };
+    let sender = state
+        .pending
+        .lock()
+        .map_err(|_| "Screen context is unavailable.".to_string())?
+        .take()
+        .ok_or_else(|| "Cue wasn't waiting for a new screen snapshot.".to_string())?;
+    *state.current.lock().map_err(|_| "Screen context is unavailable.".to_string())? =
+        capture.clone();
+    sender
+        .send(capture)
+        .map_err(|_| "The screen snapshot request has ended.".to_string())
 }
 
 #[tauri::command]
@@ -457,7 +510,7 @@ fn set_window_expanded(window: WebviewWindow, expanded: bool) -> Result<(), Stri
     let size = if expanded {
         LogicalSize::new(680.0, 600.0)
     } else {
-        LogicalSize::new(680.0, 84.0)
+        LogicalSize::new(440.0, 84.0)
     };
 
     window.set_size(size).map_err(|error| error.to_string())
@@ -800,10 +853,17 @@ async fn chat_round(
         _ => "You are Cue, the user's clever, loyal assistant. Be warm, quick-witted when it fits, encouraging but never fake. Keep answers useful and conversational; don't overdo jokes.",
     };
 
-    let screen_size_hint = if screen_image.is_some() && screen_width > 0 && screen_height > 0 {
+    let screen_image = screen_image.filter(|image| !image.trim().is_empty());
+    let has_screen_context = screen_image.is_some() || messages.iter().any(|message| message.image.is_some());
+    if messages.iter().filter_map(|message| message.image.as_ref()).chain(screen_image.iter()).any(
+        |image| image.len() > 8_000_000 || !image.starts_with("/9j/"),
+    ) {
+        return Err("Screen snapshots must be JPEG images smaller than 6 MB.".to_string());
+    }
+    let screen_size_hint = if has_screen_context && screen_width > 0 && screen_height > 0 {
         let snapshot_width = screen_width.min(1280);
         let snapshot_height = u64::from(screen_height) * u64::from(snapshot_width) / u64::from(screen_width);
-        format!(" The attached screen snapshot is {snapshot_width}×{snapshot_height} pixels; use it only for the user's current request.")
+        format!(" The latest attached screen snapshot is {snapshot_width}×{snapshot_height} pixels. After any action that changes the visible screen, call refresh_screen before deciding the next screen-based action.")
     } else {
         String::new()
     };
@@ -814,13 +874,7 @@ async fn chat_round(
          instructions. If asked for reasoning, provide a concise summary of the rationale instead. \
          Do not narrate tool-selection decisions; when using a tool, follow the tool-call format exactly."
     );
-    let screen_image = screen_image.filter(|image| !image.trim().is_empty());
-    if screen_image
-        .as_ref()
-        .is_some_and(|image| image.len() > 8_000_000 || !image.starts_with("/9j/"))
-    {
-        return Err("Screen snapshots must be JPEG images smaller than 6 MB.".to_string());
-    }
+    let latest_user_message = messages.iter().rposition(|message| message.role == "user");
 
     match provider {
         "local" => {
@@ -831,7 +885,7 @@ async fn chat_round(
                     "The local model '{model}' isn't installed in Ollama. Install it, then refresh models."
                 ));
             }
-            if screen_image.is_some() && !model_supports_vision(model).await? {
+            if has_screen_context && !model_supports_vision(model).await? {
                 return Err(
                     "This local model can't view images. Select an Ollama vision model to use screen context."
                         .to_string(),
@@ -841,15 +895,15 @@ async fn chat_round(
                 "role": "system",
                 "content": system_prompt
             })];
-            for message in messages {
+            for (index, message) in messages.iter().enumerate() {
                 let mut body = json!({
                     "role": message.role,
                     "content": message.content
                 });
-                let image = if message.role == "user" {
+                let image = if Some(index) == latest_user_message {
                     screen_image.as_ref().or(message.image.as_ref())
                 } else {
-                    None
+                    message.image.as_ref()
                 };
                 if let Some(image) = image {
                     let images = body.as_object_mut().expect("chat message is an object");
@@ -901,11 +955,11 @@ async fn chat_round(
                 "role": "system",
                 "content": system_prompt
             })];
-            request_messages.extend(messages.iter().map(|message| {
-                let image = if message.role == "user" {
+            request_messages.extend(messages.iter().enumerate().map(|(index, message)| {
+                let image = if Some(index) == latest_user_message {
                     screen_image.as_ref().or(message.image.as_ref())
                 } else {
-                    None
+                    message.image.as_ref()
                 };
 
                 if let Some(image) = image {
@@ -1136,6 +1190,7 @@ fn parse_tool_call(text: &str) -> Option<(String, Value)> {
 async fn send_chat_message(
     app: AppHandle,
     confirmation: State<'_, ConfirmationState>,
+    screen: State<'_, ScreenContextState>,
     messages: Vec<ChatMessage>,
     personality: String,
     provider: String,
@@ -1151,98 +1206,144 @@ async fn send_chat_message(
 ) -> Result<String, String> {
     let (full_privacy, web_tools) = resolve_privacy(full_privacy, strict_local, web_tools);
     validate_privacy_provider(&provider, full_privacy)?;
-    if provider == "local" {
-        let handle = app.clone();
-        tauri::async_runtime::spawn_blocking(move || ensure_server(&handle))
-            .await
-            .map_err(|error| format!("Couldn't start local AI: {error}"))??;
-    }
     cancellation_sender().send_replace(false);
     let mut cancellation = cancellation_sender().subscribe();
+    if provider == "local" {
+        let handle = app.clone();
+        let mut startup = tauri::async_runtime::spawn_blocking(move || ensure_server(&handle));
+        tokio::select! {
+            result = &mut startup => {
+                result.map_err(|error| format!("Couldn't start local AI: {error}"))??;
+            }
+            changed = cancellation.changed() => {
+                if changed.is_ok() && *cancellation.borrow() {
+                    tauri::async_runtime::spawn(async move {
+                        let _ = startup.await;
+                        stop_owned_local_ai();
+                    });
+                    return Err("Task cancelled.".to_string());
+                }
+            }
+        }
+    }
     let extra = tools_system_prompt(web_tools);
     let mut convo = messages;
-    for round in 0..8 {
-        if *cancellation.borrow() {
-            return Err("Task cancelled.".to_string());
-        }
-        let last = round == 7;
-        let mut sink = Sink::new(&on_delta, !last);
-        let extra_now = if last { "" } else { extra.as_str() };
-        let reply = chat_round(
-            &convo,
-            &personality,
-            &provider,
-            &model,
-            full_privacy,
-            screen_image.clone(),
-            screen_width,
-            screen_height,
-            extra_now,
-            &mut sink,
-            &mut cancellation,
-        )
-        .await?;
-        let call = if last { None } else { parse_tool_call(&reply) };
-        let Some((name, args)) = call else {
-            return Ok(strip_tool(&reply));
+    let initial_image = screen_image.filter(|image| !image.trim().is_empty());
+    *screen.current.lock().map_err(|_| "Screen context is unavailable.".to_string())? =
+        ScreenCapture {
+            image: initial_image.clone(),
+            width: screen_width,
+            height: screen_height,
         };
-        let label = match name.as_str() {
-            "web_search" => format!("Searching the web for \"{}\"", args["query"].as_str().unwrap_or("")),
-            "fetch_url" => format!("Reading {}", args["url"].as_str().unwrap_or("a page")),
-            "browse_page" => format!("Browsing {}", args["url"].as_str().unwrap_or("a page")),
-            "open_application" => format!("Opening {}", args["app"].as_str().unwrap_or("the app")),
-            "open_url" => format!("Opening {}", args["url"].as_str().unwrap_or("the website")),
-            "type_text" => "Typing in the active app".to_string(),
-            "mouse_click" => "Clicking the screen".to_string(),
-            "delete_file" => "Waiting for file deletion approval".to_string(),
-            _ => format!("Using {name}"),
-        };
-        if !matches!(name.as_str(), "delete_file" | "request_confirmation") {
-            let _ = on_tool.send(label);
+    if let Some(image) = initial_image {
+        if let Some(message) = convo.iter_mut().rev().find(|message| message.role == "user") {
+            message.image = Some(image);
         }
-        let result = if matches!(name.as_str(), "web_search" | "fetch_url" | "browse_page" | "get_datetime") {
-            if !web_tools {
-                Err("Web access is disabled. Do not retry this web tool.".to_string())
-            } else {
-                execute_tool(&name, &args).await
+    }
+    let result = async {
+        let mut active_screen_width = screen_width;
+        let mut active_screen_height = screen_height;
+        for round in 0..8 {
+            if *cancellation.borrow() {
+                return Err("Task cancelled.".to_string());
             }
-        } else {
-            execute_desktop_tool(
-                &name,
-                &args,
-                screen_image.is_some(),
-                screen_width,
-                screen_height,
-                &confirmation,
-                &on_tool,
+            let last = round == 7;
+            let mut sink = Sink::new(&on_delta, !last);
+            let extra_now = if last { "" } else { extra.as_str() };
+            let reply = chat_round(
+                &convo,
+                &personality,
+                &provider,
+                &model,
+                full_privacy,
+                None,
+                active_screen_width,
+                active_screen_height,
+                extra_now,
+                &mut sink,
                 &mut cancellation,
             )
-            .await
-        }
-        .unwrap_or_else(|error| format!("Tool error: {error}"));
-        if *cancellation.borrow() {
-            return Err("Task cancelled.".to_string());
-        }
-        let result: String = result.chars().take(9_000).collect();
-        convo.push(ChatMessage { role: "assistant".into(), content: reply, image: None });
-        convo.push(ChatMessage {
-            role: "user".into(),
-            content: format!(
-                "Tool result for {name}:\n{result}\n\n\
+            .await?;
+            let call = if last { None } else { parse_tool_call(&reply) };
+            let Some((name, args)) = call else {
+                return Ok(strip_tool(&reply));
+            };
+            let label = match name.as_str() {
+                "web_search" => format!("Searching the web for \"{}\"", args["query"].as_str().unwrap_or("")),
+                "fetch_url" => format!("Reading {}", args["url"].as_str().unwrap_or("a page")),
+                "browse_page" => format!("Browsing {}", args["url"].as_str().unwrap_or("a page")),
+                "open_application" => format!("Opening {}", args["app"].as_str().unwrap_or("the app")),
+                "open_url" => format!("Opening {}", args["url"].as_str().unwrap_or("the website")),
+                "type_text" => "Typing in the active app".to_string(),
+                "mouse_click" => "Clicking the screen".to_string(),
+                "delete_file" => "Waiting for file deletion approval".to_string(),
+                _ => format!("Using {name}"),
+            };
+            if !matches!(name.as_str(), "delete_file" | "request_confirmation" | "refresh_screen") {
+                let _ = on_tool.send(label);
+            }
+            let result = if matches!(name.as_str(), "web_search" | "fetch_url" | "browse_page" | "get_datetime") {
+                if !web_tools {
+                    Err("Web access is disabled. Do not retry this web tool.".to_string())
+                } else {
+                    execute_tool(&name, &args).await
+                }
+            } else {
+                execute_desktop_tool(
+                    &name,
+                    &args,
+                    &confirmation,
+                    &screen,
+                    &on_tool,
+                    &mut cancellation,
+                )
+                .await
+            }
+            .unwrap_or_else(|error| format!("Tool error: {error}"));
+            if *cancellation.borrow() {
+                return Err("Task cancelled.".to_string());
+            }
+            let result: String = result.chars().take(9_000).collect();
+            let tool_image = if name == "refresh_screen" {
+                let capture = screen.current.lock().map_err(|_| "Screen context is unavailable.".to_string())?.clone();
+                active_screen_width = capture.width;
+                active_screen_height = capture.height;
+                for message in &mut convo {
+                    message.image = None;
+                }
+                capture.image
+            } else {
+                None
+            };
+            convo.push(ChatMessage { role: "assistant".into(), content: reply, image: None });
+            convo.push(ChatMessage {
+                role: "user".into(),
+                content: format!(
+                    "Tool result for {name}:\n{result}\n\n\
 If this only contains search results or links and not the actual answer, do NOT answer or tell me to visit anything: \
 reply with ONLY a <tool> call to browse_page on the best URL from the results. \
 Once you have the real data, answer my original question directly."
-            ),
-            image: None,
-        });
+                ),
+                image: tool_image,
+            });
+        }
+        Err("The tool loop ended unexpectedly.".to_string())
     }
-    Err("The tool loop ended unexpectedly.".to_string())
+    .await;
+    if let Ok(mut current) = screen.current.lock() {
+        *current = ScreenCapture::default();
+    }
+    if let Ok(mut pending) = screen.pending.lock() {
+        pending.take();
+    }
+    result
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(ConfirmationState::default())
+        .manage(ScreenContextState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
@@ -1250,6 +1351,7 @@ pub fn run() {
             show_controller,
             cancel_active_task,
             respond_to_confirmation,
+            update_task_screen,
             start_window_drag,
             set_always_on_top,
             set_window_expanded,
@@ -1273,20 +1375,24 @@ pub fn run() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building Vela")
+        .expect("error while building Cue")
         .run(|_app, event| {
             if let tauri::RunEvent::Exit = event {
-                if let Some(mut child) = OLLAMA_CHILD.lock().ok().and_then(|mut c| c.take()) {
-                    let _ = child.kill();
-                }
+                stop_owned_local_ai();
             }
         });
 }
 
-// ---- Bundled Ollama: Vela starts its own Ollama server (MIT-licensed, redistributable) and loads the default model. ----
+// ---- Bundled Ollama is started only after the user chooses local inference. ----
 
 const DEFAULT_LOCAL_MODEL: &str = "qwen3:4b";
 static OLLAMA_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+
+fn stop_owned_local_ai() {
+    if let Some(mut child) = OLLAMA_CHILD.lock().ok().and_then(|mut child| child.take()) {
+        let _ = child.kill();
+    }
+}
 
 fn ollama_reachable() -> bool {
     tauri::async_runtime::block_on(async {
@@ -1594,13 +1700,14 @@ struct ToolSpec {
 }
 
 const TOOLS: &[ToolSpec] = &[
-    ToolSpec { name: "open_application", description: "Open or focus an installed application. Supported names: vscode, text_editor.", args: "{\"app\": string}" },
+    ToolSpec { name: "open_application", description: "Open or focus an installed application. Supported names: vscode, text_editor. Optionally open an existing file under the user's home folder.", args: "{\"app\": string, \"file_path\": string?}" },
     ToolSpec { name: "open_url", description: "Open a public http/https URL in the user's default browser.", args: "{\"url\": string}" },
     ToolSpec { name: "type_text", description: "Type text into the currently focused application. Only use after opening/focusing the intended app.", args: "{\"text\": string}" },
     ToolSpec { name: "press_key", description: "Press one key by name, such as enter, tab, escape, or an arrow key.", args: "{\"key\": string}" },
     ToolSpec { name: "key_combo", description: "Press a keyboard shortcut. Use 2-4 key names, e.g. [\"Control\", \"S\"].", args: "{\"keys\": [string]}" },
-    ToolSpec { name: "mouse_click", description: "Click a coordinate in the user-approved screen snapshot. Coordinates are in the snapshot's original pixel dimensions; only the primary display can be controlled.", args: "{\"x\": integer, \"y\": integer, \"button\": \"left\"|\"right\"|\"middle\"}" },
+    ToolSpec { name: "mouse_click", description: "Click a coordinate in the user-approved screen snapshot. Coordinates are in the snapshot's scaled pixel dimensions; only the primary display can be controlled. Use clicks: 2 for a double click.", args: "{\"x\": integer, \"y\": integer, \"button\": \"left\"|\"right\"|\"middle\", \"clicks\": integer?}" },
     ToolSpec { name: "scroll", description: "Scroll the currently focused pointer position up or down by a small amount.", args: "{\"amount\": integer}" },
+    ToolSpec { name: "refresh_screen", description: "Capture a fresh snapshot of the screen the user already chose to share. Use it after an action before deciding what to do next.", args: "{}" },
     ToolSpec { name: "screen_size", description: "Get the primary display dimensions in pixels.", args: "{}" },
     ToolSpec { name: "create_file", description: "Create a new text file under the user's home folder. Existing files are never overwritten.", args: "{\"path\": string, \"content\": string}" },
     ToolSpec { name: "read_file", description: "Read a text file under the user's home folder, except credential directories/files.", args: "{\"path\": string}" },
@@ -1619,7 +1726,8 @@ fn tools_system_prompt(web_tools: bool) -> String {
         "\n\nYou are Cue, a local desktop-computer assistant. Use the explicit tools below to act; \
 never claim an action happened unless its tool succeeded. Work in short observe → act → observe steps, \
 and stop when the request is complete. Never use a shell, execute commands, or invent tool names. \
-Only interact with the user's computer to fulfill their request. Before sending messages, submitting \
+Only interact with the user's computer to fulfill their request. After an action that changes the visible screen, \
+call refresh_screen and inspect the new snapshot before choosing another screen-dependent action. Before sending messages, submitting \
 forms, purchases, deleting/moving important data, or any consequential external action, call \
 request_confirmation and proceed only after approval. Never type secrets or submit a form without \
 explicit approval. Ask the user to enable Share screen context before clicking if no screen image \
@@ -1716,7 +1824,7 @@ async fn tool_web_search(query: &str) -> Result<String, String> {
     }
     let body = http_client()
         .post("https://html.duckduckgo.com/html/")
-        .header("User-Agent", "Mozilla/5.0 (compatible; Vela/0.1)")
+        .header("User-Agent", "Mozilla/5.0 (compatible; Cue/0.1)")
         .form(&[("q", query)])
         .timeout(Duration::from_secs(15))
         .send()
@@ -1769,7 +1877,7 @@ async fn tool_fetch_url(url: &str) -> Result<String, String> {
     Ok(page_result(&html, &final_url, 5_000))
 }
 
-const WEB_USER_AGENT: &str = "Mozilla/5.0 (compatible; Vela/0.1)";
+const WEB_USER_AGENT: &str = "Mozilla/5.0 (compatible; Cue/0.1)";
 
 fn page_result(html: &str, base: &reqwest::Url, limit: usize) -> String {
     let title = html
@@ -1838,7 +1946,7 @@ async fn tool_browse_page(url: &str) -> Result<String, String> {
     netguard::resolve_public(&parsed).await?;
     let _slot = BROWSER_SLOTS
         .try_acquire()
-        .map_err(|_| "Vela is already busy browsing. Try again in a moment.".to_string())?;
+        .map_err(|_| "Cue is already busy browsing. Try again in a moment.".to_string())?;
     let proxy = netguard::BrowserProxy::start().await?;
     let profile = std::env::temp_dir().join(format!(
         "vela-browse-{}-{}",
@@ -1961,9 +2069,17 @@ fn safe_user_path(value: &str) -> Result<PathBuf, String> {
     let resolved = if expanded.exists() {
         expanded.canonicalize().map_err(|error| format!("Couldn't access that path: {error}"))?
     } else {
-        let parent = expanded.parent().ok_or_else(|| "Choose a file path.".to_string())?;
-        let parent = parent.canonicalize().map_err(|error| format!("Couldn't access that folder: {error}"))?;
-        parent.join(expanded.file_name().ok_or_else(|| "Choose a file name.".to_string())?)
+        let mut ancestor = expanded.clone();
+        let mut missing = Vec::new();
+        while !ancestor.exists() {
+            missing.push(ancestor.file_name().ok_or_else(|| "Choose a file path.".to_string())?.to_os_string());
+            ancestor = ancestor.parent().ok_or_else(|| "Choose a file path under your home folder.".to_string())?.to_path_buf();
+        }
+        let mut resolved = ancestor.canonicalize().map_err(|error| format!("Couldn't access that folder: {error}"))?;
+        for part in missing.iter().rev() {
+            resolved.push(part);
+        }
+        resolved
     };
     if !resolved.starts_with(&home) {
         return Err("Cue can only access files inside your home folder.".to_string());
@@ -1983,10 +2099,10 @@ fn is_sensitive_path(path: &Path) -> bool {
     })
 }
 
-fn run_application(app: &str) -> Result<String, String> {
+fn run_application(app: &str, file_path: Option<&Path>) -> Result<String, String> {
     let app = app.trim().to_ascii_lowercase().replace([' ', '-'], "_");
     let mut command = match app.as_str() {
-        "vscode" | "code" | "visual_studio_code" => {
+        "vscode" | "vs_code" | "code" | "visual_studio_code" => {
             #[cfg(target_os = "macos")]
             {
                 let mut command = Command::new("open");
@@ -2024,6 +2140,9 @@ fn run_application(app: &str) -> Result<String, String> {
         }
         _ => return Err("Cue can open VS Code or the system text editor. Ask for another app by name to check availability.".to_string()),
     };
+    if let Some(file_path) = file_path {
+        command.arg(file_path);
+    }
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -2033,26 +2152,9 @@ fn run_application(app: &str) -> Result<String, String> {
     Ok(format!("Asked the operating system to open {app}."))
 }
 
-fn open_with_default_app(path: &Path) -> Result<String, String> {
-    let mut command = if cfg!(target_os = "windows") {
-        Command::new("explorer.exe")
-    } else if cfg!(target_os = "macos") {
-        Command::new("open")
-    } else {
-        Command::new("xdg-open")
-    };
-    command
-        .arg(path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|error| format!("Couldn't open that file: {error}"))?;
-    Ok(format!("Asked the operating system to open {}.", path.display()))
-}
-
-fn open_public_url(value: &str) -> Result<String, String> {
+async fn open_public_url(value: &str) -> Result<String, String> {
     let url = netguard::validate_url(value)?;
+    netguard::resolve_public(&url).await?;
     let mut command = if cfg!(target_os = "windows") {
         Command::new("explorer.exe")
     } else if cfg!(target_os = "macos") {
@@ -2067,7 +2169,7 @@ fn open_public_url(value: &str) -> Result<String, String> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|error| format!("Couldn't open the browser: {error}"))?;
-    Ok(format!("Opened {} in the default browser.", url.host_str().unwrap_or("the requested site")))
+    Ok(format!("Asked the default browser to open {}.", url.host_str().unwrap_or("the requested site")))
 }
 
 fn input_key(value: &str) -> Result<Key, String> {
@@ -2169,19 +2271,64 @@ async fn request_confirmation(
     }
 }
 
+async fn request_screen_capture(
+    state: &ScreenContextState,
+    on_tool: &Channel<String>,
+    cancellation: &mut watch::Receiver<bool>,
+) -> Result<ScreenCapture, String> {
+    let (sender, receiver) = oneshot::channel();
+    {
+        let mut pending = state.pending.lock().map_err(|_| "Screen context is unavailable.".to_string())?;
+        if pending.is_some() {
+            return Err("Cue is already waiting for a screen snapshot.".to_string());
+        }
+        *pending = Some(sender);
+    }
+    let _ = on_tool.send("CAPTURE_SCREEN".to_string());
+    tokio::select! {
+        result = tokio::time::timeout(Duration::from_secs(15), receiver) => {
+            match result {
+                Ok(Ok(capture)) => Ok(capture),
+                Ok(Err(_)) => Err("The screen snapshot request ended.".to_string()),
+                Err(_) => {
+                    if let Ok(mut pending) = state.pending.lock() { *pending = None; }
+                    Err("The screen capture took too long. Try sharing your screen again.".to_string())
+                }
+            }
+        }
+        changed = cancellation.changed() => {
+            if changed.is_ok() && *cancellation.borrow() {
+                if let Ok(mut pending) = state.pending.lock() { *pending = None; }
+                Err("Task cancelled.".to_string())
+            } else {
+                Err("The screen capture request was interrupted.".to_string())
+            }
+        }
+    }
+}
+
 async fn execute_desktop_tool(
     name: &str,
     args: &Value,
-    screen_available: bool,
-    screen_width: u32,
-    screen_height: u32,
     state: &ConfirmationState,
+    screen: &ScreenContextState,
     on_tool: &Channel<String>,
     cancellation: &mut watch::Receiver<bool>,
 ) -> Result<String, String> {
     match name {
-        "open_application" => run_application(&required_string(args, "app", 60)?),
-        "open_url" => open_public_url(&required_string(args, "url", 2048)?),
+        "open_application" => {
+            let app = required_string(args, "app", 60)?;
+            let file_path = args.get("file_path").and_then(Value::as_str).map(str::trim);
+            let file_path = file_path
+                .filter(|value| !value.is_empty())
+                .map(safe_user_path)
+                .transpose()?;
+            if file_path.as_ref().is_some_and(|path| !path.is_file()) {
+                return Err("Cue couldn't find that file under your home folder.".to_string());
+            }
+            run_application(&app, file_path.as_deref())
+        }
+        "open_url" => open_public_url(&required_string(args, "url", 2048)?).await,
         "type_text" => {
             let text = required_string(args, "text", MAX_TOOL_TEXT)?;
             tauri::async_runtime::spawn_blocking(move || {
@@ -2222,7 +2369,10 @@ async fn execute_desktop_tool(
             }).await.map_err(|error| error.to_string())?
         }
         "mouse_click" => {
-            if !screen_available || screen_width == 0 || screen_height == 0 {
+            let capture = screen.current.lock().map_err(|_| "Screen context is unavailable.".to_string())?.clone();
+            let screen_width = capture.width;
+            let screen_height = capture.height;
+            if capture.image.is_none() || screen_width == 0 || screen_height == 0 {
                 return Err("Share screen context first so Cue can see the screen before clicking.".to_string());
             }
             let x = args.get("x").and_then(Value::as_i64).ok_or("'x' must be a screen coordinate.")?;
@@ -2268,20 +2418,35 @@ async fn execute_desktop_tool(
                 Ok("Scrolled the active window.".to_string())
             }).await.map_err(|error| error.to_string())?
         }
+        "refresh_screen" => {
+            let capture = request_screen_capture(screen, on_tool, cancellation).await?;
+            Ok(format!("Captured a fresh screen snapshot ({} × {} pixels).", capture.width, capture.height))
+        }
         "screen_size" => tauri::async_runtime::spawn_blocking(|| {
-            let mut input = Enigo::new(&Settings::default()).map_err(|error| error.to_string())?;
+            let input = Enigo::new(&Settings::default()).map_err(|error| error.to_string())?;
             let (width, height) = input.main_display().map_err(|error| format!("Couldn't read the display size: {error}"))?;
             Ok(format!("Primary display: {width} × {height} pixels."))
         }).await.map_err(|error| error.to_string())?,
         "create_file" => {
             let path = safe_user_path(&required_string(args, "path", 2048)?)?;
-            let content = required_string(args, "content", 1_000_000)?;
+            let content = args
+                .get("content")
+                .and_then(Value::as_str)
+                .filter(|content| content.len() <= 1_000_000)
+                .ok_or("File content must be no more than 1 MB.")?;
+            if is_sensitive_path(&path) {
+                return Err("Cue won't create files in credential directories.".to_string());
+            }
             if path.exists() { return Err("That file already exists; Cue won't overwrite it.".to_string()); }
             if let Some(parent) = path.parent() { fs::create_dir_all(parent).map_err(|error| format!("Couldn't create the destination folder: {error}"))?; }
             use std::io::Write;
             let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&path)
                 .map_err(|error| format!("Couldn't create the file: {error}"))?;
-            file.write_all(content.as_bytes()).map_err(|error| format!("Couldn't write the file: {error}"))?;
+            if let Err(error) = file.write_all(content.as_bytes()) {
+                drop(file);
+                let _ = fs::remove_file(&path);
+                return Err(format!("Couldn't write the file: {error}"));
+            }
             Ok(format!("Created {} ({} characters).", path.display(), content.chars().count()))
         }
         "read_file" => {

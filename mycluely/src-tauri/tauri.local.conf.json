@@ -1,5 +1,5 @@
 {
-  "productName": "Vela Local",
+  "productName": "Cue Local",
   "bundle": {
     "resources": ["resources/speech/**/*", "resources/ollama/**/*"]
   }

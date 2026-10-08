@@ -43,12 +43,12 @@ const HOTKEY_CHOICES = ["CommandOrControl+Shift+Space", "CommandOrControl+Alt+Sp
 const SHORTCUT_GROUPS: { group: string; items: [string, string][] }[] = [
   {
     group: "Anywhere (global)",
-    items: [["Ctrl+Shift+Space", "Start/stop voice note"]],
+    items: [["GLOBAL", "Summon Cue & focus the message box"]],
   },
   {
     group: "Talk to Cue",
     items: [
-      ["Ctrl+Shift+Space", "Summon Cue & focus the message box"],
+      ["Ctrl+L", "Open chat & focus the message box"],
       ["Enter", "Send message"],
       ["Shift+Enter", "New line"],
       ["Ctrl+Shift+N", "New conversation"],
@@ -83,18 +83,23 @@ const SHORTCUT_GROUPS: { group: string; items: [string, string][] }[] = [
   },
 ];
 const FALLBACK_SUGGESTIONS = [
-  "Help me prep for an interview",
-  "Make this sound more confident",
-  "Give me a clever way to start",
-  "Talk me through a tough decision",
-  "Explain something I keep avoiding",
-  "Draft a reply I've been dreading",
-  "Roast my plan, kindly",
-  "Teach me something in two minutes",
+  "Open VS Code",
+  "Search the web for React docs",
+  "What am I looking at?",
+  "Write a note on my desktop",
+  "Open my text editor",
+  "Find a file in Documents",
+  "Help me organize these files",
+  "Type a message for me",
 ];
 
 function pickFallbackSuggestions() {
   return [...FALLBACK_SUGGESTIONS].sort(() => Math.random() - 0.5).slice(0, 3);
+}
+
+function formatHotkey(shortcut: string) {
+  const modifier = /Macintosh|Mac OS X/.test(navigator.userAgent) ? "⌘" : "Ctrl";
+  return shortcut.replace("CommandOrControl", modifier);
 }
 
 const personalities: Record<
@@ -377,7 +382,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isTauri() || !settingsOpen || provider !== "local") return;
     invoke<LocalAiStatus>("get_local_ai_status")
       .then((status) => {
         setLocalAiStatus(status);
@@ -393,7 +398,7 @@ function App() {
         console.error("Couldn't check local model availability:", error);
         setLocalStatusMessage("Couldn't check whether Ollama is running.");
       });
-  }, []);
+  }, [settingsOpen, provider]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -404,60 +409,7 @@ function App() {
     window.localStorage.setItem("vela.alwaysOnTop", String(alwaysOnTop));
   }, [alwaysOnTop]);
 
-  const [suggestions, setSuggestions] = useState<string[]>(() => pickFallbackSuggestions());
-  const [welcome, setWelcome] = useState<{ title: string; body: string } | null>(null);
-  const noMessages = messages.length === 0;
-  const providerReady =
-    provider === "openai" ? apiKeyPresent : Boolean(localModel);
-  useEffect(() => {
-    if (!isTauri() || !expanded || !noMessages || !providerReady) return;
-    let cancelled = false;
-    setSuggestions(pickFallbackSuggestions());
-    setWelcome(null);
-    const sink = new Channel<string>();
-    sink.onmessage = () => {};
-    const seed = Math.random().toString(36).slice(2, 8);
-    invoke<string>("send_chat_message", {
-      messages: [
-        {
-          role: "user",
-          content:
-            `Write a welcome screen for the user (variety seed: ${seed}). Line 1: a short punchy greeting headline in your personality, under 8 words. Line 2: one warm sentence under 20 words inviting them to start. Lines 3-5: 3 fresh, specific, varied conversation starters a user might tap to begin chatting with you. ` +
-            "Mix topics: work, writing, decisions, social situations, learning, ideas. " +
-            "Each starter is under 7 words, written as something the user would say to you. " +
-            "Reply with exactly 5 lines, no numbering, bullets, quotes, labels or extra text.",
-        },
-      ],
-      personality,
-      provider,
-      model: localModel,
-      fullPrivacy,
-      screenImage: null,
-      screenWidth: 0,
-      screenHeight: 0,
-      webTools: false,
-      strictLocal: false,
-      onDelta: sink,
-      onTool: new Channel<string>(),
-    })
-      .then((reply) => {
-        const lines = reply
-          .split("\n")
-          .map((line) => line.replace(/^[\s\-*\d.)"“]+|["”\s]+$/g, "").trim())
-          .filter((line) => line.length > 3 && line.length <= 160);
-        if (!cancelled && lines.length === 5) {
-          setWelcome({ title: lines[0], body: lines[1] });
-          setSuggestions(lines.slice(2).filter((line) => line.length <= 60));
-        }
-      })
-      .catch((error: unknown) => {
-        console.error("Couldn't generate suggestions:", error);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [expanded, noMessages, providerReady, personality, provider, localModel, fullPrivacy]);
-
+  const [suggestions] = useState<string[]>(() => pickFallbackSuggestions());
   const lastMessageCount = useRef(0);
   useEffect(() => {
     // Only jump down when a new message is added, never while a reply streams in.
@@ -1006,7 +958,7 @@ function App() {
     }
 
     if (!isTauri()) {
-      setCredentialStatus("Save your API key from the Vela desktop app.");
+      setCredentialStatus("Save your API key from the Cue desktop app.");
       return;
     }
 
@@ -1015,7 +967,7 @@ function App() {
       await invoke("save_api_key", { apiKey });
       setApiKeyPresent(true);
       setApiKeyInput("");
-      setCredentialStatus("Saved securely in your system keychain.");
+      setCredentialStatus("Saved securely in your system credential store.");
     } catch (error) {
       console.error("Failed to save API key:", error);
       setCredentialStatus(
@@ -1026,7 +978,7 @@ function App() {
 
   const removeApiKey = async () => {
     if (!isTauri()) {
-      setCredentialStatus("Manage your API key from the Vela desktop app.");
+      setCredentialStatus("Manage your API key from the Cue desktop app.");
       return;
     }
 
@@ -1056,10 +1008,11 @@ function App() {
     }
   };
 
+  const setupBusy = Boolean(localSetup?.progress?.active);
   useEffect(() => {
     if (!isTauri() || !settingsOpen || provider !== "local") return;
     let stop = false;
-    let wasActive = false;
+    let wasActive = setupBusy;
     const tick = async () => {
       try {
         const setup = await invoke<NonNullable<typeof localSetup>>("get_local_ai_setup");
@@ -1071,18 +1024,33 @@ function App() {
       } catch { /* ignore */ }
     };
     void tick();
+    if (!setupBusy) return () => { stop = true; };
     const id = window.setInterval(() => void tick(), 5000);
     return () => { stop = true; window.clearInterval(id); };
-  }, [settingsOpen, provider]);
+  }, [settingsOpen, provider, setupBusy]);
 
   const refreshLocalModelsRef = useRef<() => Promise<void>>(async () => {});
 
   const startLocalAction = async (command: string, args?: Record<string, unknown>) => {
+    const isSetupAction = command === "install_local_ai" || command === "pull_model";
+    if (isSetupAction) {
+      setLocalSetup((current) => current ? {
+        ...current,
+        progress: { active: true, label: "Starting", percent: -1, error: null },
+      } : current);
+    }
     try {
       await invoke(command, args);
       setLocalStatusMessage("");
     } catch (error) {
-      setLocalStatusMessage(typeof error === "string" ? error : "That didn't work.");
+      const message = typeof error === "string" ? error : "That didn't work.";
+      setLocalStatusMessage(message);
+      if (isSetupAction) {
+        setLocalSetup((current) => current ? {
+          ...current,
+          progress: { active: false, label: "", percent: 100, error: message },
+        } : current);
+      }
     }
   };
 
@@ -1362,6 +1330,7 @@ function App() {
     setIsSending(true);
     setCopilotState("thinking");
 
+    let failed = false;
     try {
       const screen = await snapshotScreen();
       const stream = new Channel<string>();
@@ -1369,6 +1338,19 @@ function App() {
       setMessages([...nextMessages, { role: "assistant", content: "" }]);
       const toolChannel = new Channel<string>();
       toolChannel.onmessage = (label) => {
+        if (label === "CAPTURE_SCREEN") {
+          void snapshotScreen().then(async (capture) => {
+            if (!capture.image) throw new Error("Share a screen with Cue before asking it to inspect the screen.");
+            await invoke("update_task_screen", {
+              screenImage: capture.image,
+              screenWidth: capture.width,
+              screenHeight: capture.height,
+            });
+          }).catch((error: unknown) => {
+            setChatError(typeof error === "string" ? error : error instanceof Error ? error.message : "Couldn't refresh screen context.");
+          });
+          return;
+        }
         if (label.startsWith("CONFIRM: ")) {
           setPendingConfirmation(label.slice("CONFIRM: ".length));
           setToolStatus("");
@@ -1386,7 +1368,7 @@ function App() {
         setMessages([...nextMessages, { role: "assistant", content: snapshot }]);
       };
       const reply = await invoke<string>("send_chat_message", {
-        messages: nextMessages.slice(-12),
+        messages: nextMessages.slice(-8),
         personality,
         provider,
         model: localModel,
@@ -1405,6 +1387,7 @@ function App() {
       ]);
       speakText(reply);
     } catch (error) {
+      failed = true;
       console.error("Assistant request failed:", error);
       setMessages(nextMessages.slice(0, -1));
       setDraft(content);
@@ -1417,7 +1400,8 @@ function App() {
       setIsSending(false);
       setToolStatus("");
       setPendingConfirmation("");
-      setCopilotState("idle");
+      if (screenSharing) stopScreenContext();
+      setCopilotState(failed ? "error" : "idle");
     }
   };
 
@@ -1515,10 +1499,20 @@ function App() {
                   <div className="responding-pulse" />
                 )}
 
-                {copilotState === "idle" && (
+                {copilotState === "acting" && (
+                  <div className="acting-pulse" />
+                )}
+
+                {copilotState === "confirming" && (
+                  <div className="confirm-indicator">!</div>
+                )}
+
+                {(copilotState === "idle" || copilotState === "error") && (
                   <div
                     className={
-                      meetingCapture
+                      copilotState === "error"
+                        ? "error-dot"
+                        : meetingCapture
                         ? "recording-dot"
                         : microphoneStatus === "Microphone unavailable"
                         ? "error-dot"
@@ -1566,7 +1560,7 @@ function App() {
             title={
               copilotState === "listening"
                 ? "Stop recording to transcribe your voice note"
-                : "Record a voice message (Ctrl+Shift+Space)"
+                : "Record a voice message (Ctrl+Shift+M)"
             }
             disabled={isTranscribing}
           >
@@ -1675,7 +1669,7 @@ function App() {
         <div className="recording-banner" role="status">
           <span className="rec-dot" aria-hidden="true" />
           <strong>RECORDING</strong>
-          <span>{meetingCapture ? "Capturing meeting audio. Use Stop capture to end it." : `Listening to your microphone. Press ${hotkey.replace("CommandOrControl", "Ctrl")} to stop.`}</span>
+          <span>{meetingCapture ? "Capturing meeting audio. Use Stop capture to end it." : `Listening to your microphone. Press ${formatHotkey(hotkey)} to stop.`}</span>
         </div>
       )}
       {pendingConfirmation && (
@@ -1700,7 +1694,7 @@ function App() {
               <p>Control your computer with your voice or a quick message.</p>
             </div>
             <div className="provider-card">
-              <p className="provider-copy"><strong>Summon Cue:</strong> press <kbd>{hotkey.replace("CommandOrControl", "Ctrl")}</kbd> from any app to open Cue and focus the message box. Turn on the microphone when you want to speak.</p>
+              <p className="provider-copy"><strong>Summon Cue:</strong> press <kbd>{formatHotkey(hotkey)}</kbd> from any app to open Cue and focus the message box. Turn on the microphone when you want to speak.</p>
               <p className="provider-copy">Cue uses your OpenAI API key or an on-device Ollama model. Your key is stored in the system credential store; relevant messages and optional screen snapshots are sent to the selected provider.</p>
               {!apiKeyPresent && provider === "openai" && (
                 <div className="key-entry">
@@ -1721,7 +1715,7 @@ function App() {
         <div className="shortcuts-overlay" role="dialog" aria-label="Recording consent" onClick={() => setConsentPrompt(false)}>
           <div className="shortcuts-card" onClick={(event) => event.stopPropagation()}>
             <div className="shortcuts-head"><strong>Before you record a meeting</strong></div>
-            <p className="provider-copy">Recording or transcribing other people may require their consent where you live. You are responsible for informing participants and following local law and your organization's policies. Vela does not store audio; transcripts stay in this session unless you keep them.</p>
+            <p className="provider-copy">Recording or transcribing other people may require their consent where you live. You are responsible for informing participants and following local law and your organization's policies. Cue does not store audio; transcripts stay in this session unless you keep them.</p>
             <div className="key-entry">
               <button type="button" className="save-key-button" onClick={() => {
                 window.localStorage.setItem("vela.recordingConsent", "true");
@@ -1845,7 +1839,7 @@ function App() {
                     {apiKeyPresent ? "Connected" : "Not connected"}
                   </span>
                 </div>
-                <p className="provider-copy">Your key stays in your system keychain. Cloud chat and transcription are sent to OpenAI only when Cloud is selected. If you turn on screen context in Cloud mode, one screenshot is sent with your message. Cue never saves screenshots to disk.</p>
+                <p className="provider-copy">Your key stays in your system credential store. Cloud chat and transcription are sent to OpenAI only when Cloud is selected. If you turn on screen context in Cloud mode, one screenshot is sent with your message. Cue never saves screenshots to disk.</p>
                 <div className="key-entry">
                   <input
                     type="password"
@@ -1873,12 +1867,12 @@ function App() {
                 <div className="provider-card feature-settings">
                   <div className="eyebrow">YOUR FLOW</div>
                   <div className="hotkey-row">
-                    <label htmlFor="hotkey-select"><strong>Voice shortcut</strong></label>
+                    <label htmlFor="hotkey-select"><strong>Summon Cue shortcut</strong></label>
                     <select id="hotkey-select" value={hotkey} onChange={(event) => {
                       setHotkey(event.target.value);
                       window.localStorage.setItem("vela.hotkey", event.target.value);
                     }}>
-                      {HOTKEY_CHOICES.map((choice) => <option key={choice} value={choice}>{choice.replace("CommandOrControl", "Ctrl")}</option>)}
+                      {HOTKEY_CHOICES.map((choice) => <option key={choice} value={choice}>{formatHotkey(choice)}</option>)}
                     </select>
                   </div>
                   {hotkeyError && <p className="credential-status" role="alert">{hotkeyError}</p>}
@@ -1920,8 +1914,8 @@ function App() {
                   <div className="welcome-card">
                     <div className="welcome-orb"><span /></div>
                     <div className="eyebrow">YOUR {personalities[personality].label.toUpperCase()}</div>
-                    <h1>{welcome?.title ?? "Hey, I’m in your corner."}</h1>
-                    <p>{welcome?.body ?? "Bring me the awkward bit, the big question, or the blank page. We’ll figure it out together."}</p>
+                    <h1>What should we do?</h1>
+                    <p>Tell Cue what you want done, and it will take the next step.</p>
                     <div className="suggestion-list">
                       {suggestions.map((suggestion) => (
                         <button
@@ -2059,16 +2053,19 @@ function App() {
             {SHORTCUT_GROUPS.map(({ group, items }) => (
               <div key={group} className="shortcuts-group">
                 <h3>{group}</h3>
-                {items.map(([keys, label]) => (
-                  <div key={keys} className="shortcut-row">
-                    <span>{label}</span>
-                    <span className="kbd-set">
-                      {keys.split(" or ").map((combo, i) => (
-                        <span key={combo}>{i > 0 && " or "}{combo.split("+").map((k, j) => <kbd key={j}>{k}</kbd>)}</span>
-                      ))}
-                    </span>
-                  </div>
-                ))}
+                {items.map(([keys, label]) => {
+                  const displayedKeys = keys === "GLOBAL" ? formatHotkey(hotkey) : keys;
+                  return (
+                    <div key={keys} className="shortcut-row">
+                      <span>{label}</span>
+                      <span className="kbd-set">
+                        {displayedKeys.split(" or ").map((combo, i) => (
+                          <span key={combo}>{i > 0 && " or "}{combo.split("+").map((k, j) => <kbd key={j}>{k}</kbd>)}</span>
+                        ))}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             ))}
           </div>

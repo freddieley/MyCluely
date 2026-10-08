@@ -1,44 +1,28 @@
-# Vela - AI that's there when you need it
+# Cue
 
-Vela is a personality-led desktop assistant built with Tauri, React, and TypeScript. Its floating bar can stay above other windows, and the assistant supports cloud and local inference, voice notes, optional screen context, meeting-audio transcription, and spoken replies.
+Cue is a floating desktop controller. Press **Ctrl/Cmd+Shift+Space** in any app to bring Cue forward and focus its message box, then type a request or start a voice note.
 
-## Run locally
+## Run the desktop app
 
-```powershell
+```sh
 npm install
 npm run tauri dev
 ```
 
-The global shortcut is **Ctrl+Shift+Space** on Windows and **Cmd+Shift+Space** on macOS. It starts or stops an uncapped voice-note session; audio is transcribed in sequential 30-second segments and assembled in the composer.
+## AI provider
 
-## Choose an AI provider
+In Settings, use an OpenAI API key or select an installed Ollama model. Cue stores the OpenAI key in the operating-system credential store and migrates keys saved by earlier MyCluely and Vela releases. Cue does not send an OpenAI request until you send a message; local Ollama is started only when you choose the local provider and send a message.
 
-In **Settings**, choose **Cloud** to use your own OpenAI API key, or **On-device** to use an installed Ollama model. Vela stores the OpenAI key in the operating system credential store and migrates an existing MyCluely key on first use. Local model availability and speed depend on installed models and device hardware; Vela does not silently fall back to a cloud model.
+The selected provider receives the conversation needed to answer your request. Screen context is optional: choose a screen when prompted, and Cue sends one reduced snapshot with that message. Cue stops screen capture after the snapshot; it does not save images to disk.
 
-**Full Privacy Mode** locks chat and transcription to local services. It requires a running Ollama server with a selected model; speech models are bundled with the app and need no setup. Screen images, voice, and meeting audio are not sent to OpenAI in this mode. Local transcription uses temporary audio files and removes them after each transcription attempt.
+## Computer actions
 
-## Context and accessibility
+Cue uses explicit local tools to launch VS Code or the system text editor, open public URLs, type text, press keys, click in a user-approved screen snapshot, and work with files under your home folder. It does not offer arbitrary shell execution. Existing files are never overwritten, sensitive credential paths are excluded from file reads, and deleting a file requires an in-app confirmation. Confirm consequential external actions before Cue submits them.
 
-- **Screen context** is opt-in. Start sharing and Vela captures a reduced JPEG snapshot only when you send a message.
-- **Meeting transcription** is opt-in, visibly active, and uses sequential 30-second audio segments. Captured transcript stays in the app until you add it to a message.
-- **Speak replies aloud** uses the bundled Piper voice (en_US lessac), fully on-device. The OS voice is only a fallback outside Full Privacy Mode. Stop speech at any time in Settings or beside a reply.
-- **Keep the Vela bar on top** is configurable and saved on this device.
-- Choose Wingmate, Coach, or Direct in Settings.
+Mouse control requires screen context and is limited to the primary display. The operating system may require Accessibility/Input Monitoring permission (macOS) or an X11 session with input-injection support (Linux). When a platform or permission does not support an action, Cue reports that failure rather than claiming success.
 
-## Notes
+## Voice and local inference
 
-Screen capture and meeting audio availability depend on the selected display/window and operating-system capture support. A display source that does not provide an audio track cannot be used for meeting transcription. Voice transcripts are placed in the composer for review; they are not sent as chat until you press send.
+Voice input is transcribed in short segments and placed in the message box for review; it is not a continuous realtime conversation. On Windows, fetch the pinned speech assets with `npm run assets` before using voice or packaging. On-device chat requires Ollama and an installed model; select **Private Mode** to keep model prompts local, or **Strict Local Mode** to disable web-search tools as well.
 
-## Bundled speech models
-
-Speech-to-text (whisper.cpp + `ggml-base.en`) and text-to-speech (Piper + en_US lessac voice) ship inside the installer, so there is nothing to configure. The binaries are not committed to git (~230 MB); before `npm run tauri build` or a dev run, fetch them once:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/fetch-speech-assets.ps1
-```
-
-The installer is therefore a few hundred MB. whisper.cpp, Whisper weights and Piper are MIT-licensed; Piper bundles espeak-ng (GPL) and the lessac voice has its own dataset licence — review them before redistributing.
-
-## Streaming and pinning
-
-Replies stream into the chat token by token. The pin button docks the bar to the top-centre of the current monitor (always on top); unpin to move it freely.
+The default global shortcut can be changed in Settings. Press **Ctrl+Shift+M** to start or stop voice input while Cue is open. Screen capture and microphone use are user initiated and visibly indicated.
