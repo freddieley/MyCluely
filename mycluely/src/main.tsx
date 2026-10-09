@@ -11,7 +11,7 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { fai
     if (this.state.failed) {
       return (
         <div style={{ padding: 16, color: "#eee", font: "14px system-ui" }}>
-          <p>Vela hit an unexpected error.</p>
+          <p>Cue hit an unexpected error.</p>
           <button onClick={() => window.location.reload()}>Reload</button>
         </div>
       );

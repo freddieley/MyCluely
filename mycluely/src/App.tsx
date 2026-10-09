@@ -1935,7 +1935,7 @@ function App() {
                       <article key={`${index}-${message.role}`} className={`message ${message.role}`}>
                         {message.role === "assistant" && <span className="message-avatar">V</span>}
                         <div className="message-content">
-                        {message.role === "assistant" && <span className="message-author">VELA</span>}
+                        {message.role === "assistant" && <span className="message-author">CUE</span>}
                           {message.role === "assistant"
                             ? <div className="md"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children }) => (
                               <a href={href} target="_blank" rel="noreferrer" onClick={(event) => {
