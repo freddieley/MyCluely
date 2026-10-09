@@ -1351,6 +1351,24 @@ function App() {
           });
           return;
         }
+        if (label.startsWith("RESULT: ")) {
+          try {
+            const report = JSON.parse(label.slice("RESULT: ".length)) as { tool: string; status: string; message: string };
+            const text = report.message.slice(0, 160);
+            setCopilotState("acting");
+            setPendingConfirmation("");
+            setToolStatus(
+              report.status === "success" ? `Done: ${report.tool}`
+                : report.status === "declined" ? `Declined: ${report.tool} was not run`
+                : report.status === "cancelled" ? "Cancelled"
+                : report.status === "timed_out" ? `Timed out: ${text}`
+                : `Failed: ${text}`,
+            );
+          } catch {
+            setToolStatus("");
+          }
+          return;
+        }
         if (label.startsWith("CONFIRM: ")) {
           setPendingConfirmation(label.slice("CONFIRM: ".length));
           setToolStatus("");

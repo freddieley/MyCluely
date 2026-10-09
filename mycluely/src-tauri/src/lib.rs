@@ -2,13 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+mod agent_policy;
 mod netguard;
 
 use enigo::{
     Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings,
 };
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -1243,6 +1244,8 @@ async fn send_chat_message(
     let result = async {
         let mut active_screen_width = screen_width;
         let mut active_screen_height = screen_height;
+        let mut tainted = false;
+        let mut loop_guard = agent_policy::LoopGuard::default();
         for round in 0..8 {
             if *cancellation.borrow() {
                 return Err("Task cancelled.".to_string());
@@ -1282,28 +1285,57 @@ async fn send_chat_message(
             if !matches!(name.as_str(), "delete_file" | "request_confirmation" | "refresh_screen") {
                 let _ = on_tool.send(label);
             }
-            let result = if matches!(name.as_str(), "web_search" | "fetch_url" | "browse_page" | "get_datetime") {
-                if !web_tools {
-                    Err("Web access is disabled. Do not retry this web tool.".to_string())
-                } else {
-                    execute_tool(&name, &args).await
-                }
-            } else {
-                execute_desktop_tool(
-                    &name,
-                    &args,
-                    &confirmation,
-                    &screen,
-                    &on_tool,
-                    &mut cancellation,
-                )
-                .await
+            let context = agent_policy::TaskContext { tainted };
+            let report = agent_policy::guarded_execute(
+                &name,
+                &args,
+                context,
+                &cancellation,
+                agent_policy::tool_timeout(&name),
+                |prompt| {
+                    let mut cancel = cancellation.clone();
+                    let confirmation = &confirmation;
+                    let on_tool = &on_tool;
+                    async move { request_confirmation(confirmation, on_tool, &prompt, &mut cancel).await }
+                },
+                || {
+                    let mut cancel = cancellation.clone();
+                    let (name, args) = (name.clone(), args.clone());
+                    let (confirmation, screen, on_tool) = (&confirmation, &screen, &on_tool);
+                    async move {
+                        if agent_policy::is_web_tool(&name) {
+                            if !web_tools {
+                                Err("Web access is disabled. Do not retry this web tool.".to_string())
+                            } else {
+                                execute_tool(&name, &args).await
+                            }
+                        } else {
+                            execute_desktop_tool(&name, &args, confirmation, screen, on_tool, &mut cancel).await
+                        }
+                    }
+                },
+            )
+            .await;
+            if let Ok(json) = serde_json::to_string(&report) {
+                let _ = on_tool.send(format!("RESULT: {json}"));
             }
-            .unwrap_or_else(|error| format!("Tool error: {error}"));
-            if *cancellation.borrow() {
+            if report.status == agent_policy::Status::Cancelled || *cancellation.borrow() {
                 return Err("Task cancelled.".to_string());
             }
-            let result: String = result.chars().take(9_000).collect();
+            if report.is_success()
+                && matches!(agent_policy::tool_class(&name), Some(agent_policy::ToolClass::UntrustedSource))
+            {
+                tainted = true;
+            }
+            let mut result: String = report.for_model().chars().take(9_000).collect();
+            if report.is_success()
+                && matches!(agent_policy::tool_class(&name), Some(agent_policy::ToolClass::UntrustedSource))
+            {
+                result = agent_policy::wrap_untrusted(&name, &result);
+            }
+            if let Err(stop) = loop_guard.record(&name, &args, report.is_success()) {
+                return Err(stop);
+            }
             let tool_image = if name == "refresh_screen" {
                 let capture = screen.current.lock().map_err(|_| "Screen context is unavailable.".to_string())?.clone();
                 active_screen_width = capture.width;
@@ -2052,39 +2084,7 @@ fn home_directory() -> Result<PathBuf, String> {
 }
 
 fn safe_user_path(value: &str) -> Result<PathBuf, String> {
-    if value.trim().is_empty() || value.len() > 2048 {
-        return Err("Choose a valid file path under your home folder.".to_string());
-    }
-    let home = home_directory()?;
-    let expanded = value
-        .strip_prefix("~/")
-        .map(|relative| home.join(relative))
-        .unwrap_or_else(|| {
-            let path = PathBuf::from(value);
-            if path.is_absolute() { path } else { home.join(path) }
-        });
-    if expanded.components().any(|part| matches!(part, Component::ParentDir)) {
-        return Err("Paths that navigate outside a folder aren't allowed.".to_string());
-    }
-    let resolved = if expanded.exists() {
-        expanded.canonicalize().map_err(|error| format!("Couldn't access that path: {error}"))?
-    } else {
-        let mut ancestor = expanded.clone();
-        let mut missing = Vec::new();
-        while !ancestor.exists() {
-            missing.push(ancestor.file_name().ok_or_else(|| "Choose a file path.".to_string())?.to_os_string());
-            ancestor = ancestor.parent().ok_or_else(|| "Choose a file path under your home folder.".to_string())?.to_path_buf();
-        }
-        let mut resolved = ancestor.canonicalize().map_err(|error| format!("Couldn't access that folder: {error}"))?;
-        for part in missing.iter().rev() {
-            resolved.push(part);
-        }
-        resolved
-    };
-    if !resolved.starts_with(&home) {
-        return Err("Cue can only access files inside your home folder.".to_string());
-    }
-    Ok(resolved)
+    agent_policy::resolve_in_root(&home_directory()?, value)
 }
 
 fn is_sensitive_path(path: &Path) -> bool {
@@ -2487,10 +2487,7 @@ async fn execute_desktop_tool(
             let path = safe_user_path(&required_string(args, "path", 2048)?)?;
             if is_sensitive_path(&path) { return Err("Cue won't delete credential or key files.".to_string()); }
             if !path.is_file() { return Err("Cue only deletes individual files, not folders.".to_string()); }
-            let action = format!("Delete {} permanently?", path.display());
-            if !request_confirmation(state, on_tool, &action, cancellation).await? {
-                return Ok("The user declined to delete the file.".to_string());
-            }
+            // Confirmation is enforced by agent_policy::guarded_execute before this runs.
             fs::remove_file(&path).map_err(|error| format!("Couldn't delete the file: {error}"))?;
             Ok(format!("Deleted {}.", path.display()))
         }
