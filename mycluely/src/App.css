@@ -1660,3 +1660,21 @@ kbd{display:inline-block;margin-right:3px;padding:1px 6px;border-radius:5px;font
 .hotkey-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
 .hotkey-row select{background:rgba(255,255,255,.06);color:inherit;border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:5px 8px}
 .onboarding kbd{padding:1px 6px;border-radius:5px;border:1px solid rgba(255,255,255,.25);font-size:12px}
+
+.task-activity {
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  font-size: 12px;
+}
+.task-activity ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.task-activity li { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+.activity-state { font-weight: 600; min-width: 84px; opacity: 0.85; }
+.activity-detail { flex-basis: 100%; opacity: 0.7; padding-left: 90px; }
+.activity-success .activity-state { color: #5fd38d; }
+.activity-error .activity-state, .activity-timed_out .activity-state { color: #ff7a7a; }
+.activity-declined .activity-state, .activity-cancelled .activity-state { color: #e0b252; }
+.activity-awaiting_confirmation .activity-state { color: #7ab6ff; }
+.task-outcome { margin: 8px 0 0; padding-top: 6px; border-top: 1px solid rgba(255, 255, 255, 0.1); }
+.outcome-partial, .outcome-limit_reached, .outcome-timed_out, .outcome-provider_failed { color: #e0b252; }

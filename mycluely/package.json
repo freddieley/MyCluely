@@ -11,7 +11,8 @@
     "assets": "powershell -ExecutionPolicy Bypass -File scripts/fetch-assets.ps1",
     "assets:local": "powershell -ExecutionPolicy Bypass -File scripts/fetch-assets.ps1 -IncludeOllama",
     "build:cloud": "npm run assets && tauri build",
-    "build:local": "powershell -ExecutionPolicy Bypass -File scripts/fetch-assets.ps1 -IncludeOllama && tauri build --config src-tauri/tauri.local.conf.json"
+    "build:local": "powershell -ExecutionPolicy Bypass -File scripts/fetch-assets.ps1 -IncludeOllama && tauri build --config src-tauri/tauri.local.conf.json",
+    "test": "node --test src/taskEvents.test.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

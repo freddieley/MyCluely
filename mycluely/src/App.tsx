@@ -6,6 +6,7 @@ import {
   register,
   unregister,
 } from "@tauri-apps/plugin-global-shortcut";
+import { outcomeLabel, reduceTaskEvent, statusLine, type TaskEvent, type TaskView } from "./taskEvents.ts";
 import "./App.css";
 
 type CopilotState =
@@ -159,6 +160,8 @@ function App() {
   );
   const [toolStatus, setToolStatus] = useState("");
   const [pendingConfirmation, setPendingConfirmation] = useState("");
+  const [task, setTask] = useState<TaskView | null>(null);
+  const taskRef = useRef<TaskView | null>(null);
   const [chatError, setChatError] =
     useState("");
 
@@ -1283,7 +1286,7 @@ function App() {
     setPendingConfirmation("");
     setToolStatus("");
     try {
-      await invoke("cancel_active_task");
+      await invoke("cancel_active_task", { taskId: taskRef.current?.phase === "running" ? taskRef.current.taskId : null });
     } catch (error) {
       console.error("Couldn't cancel Cue's task:", error);
     }
@@ -1294,7 +1297,9 @@ function App() {
     setPendingConfirmation("");
     setCopilotState(approved ? "acting" : "thinking");
     try {
-      await invoke("respond_to_confirmation", { approved });
+      const active = taskRef.current;
+      if (!active) throw new Error("That confirmation is no longer active.");
+      await invoke("respond_to_confirmation", { taskId: active.taskId, approved });
     } catch (error) {
       setChatError(typeof error === "string" ? error : "That confirmation is no longer active.");
     }
@@ -1327,6 +1332,8 @@ function App() {
     setMessages(nextMessages);
     setDraft("");
     setChatError("");
+    taskRef.current = null;
+    setTask(null);
     setIsSending(true);
     setCopilotState("thinking");
 
@@ -1336,47 +1343,44 @@ function App() {
       const stream = new Channel<string>();
       let streamed = "";
       setMessages([...nextMessages, { role: "assistant", content: "" }]);
-      const toolChannel = new Channel<string>();
-      toolChannel.onmessage = (label) => {
-        if (label === "CAPTURE_SCREEN") {
-          void snapshotScreen().then(async (capture) => {
-            if (!capture.image) throw new Error("Share a screen with Cue before asking it to inspect the screen.");
-            await invoke("update_task_screen", {
-              screenImage: capture.image,
-              screenWidth: capture.width,
-              screenHeight: capture.height,
+      const eventChannel = new Channel<TaskEvent>();
+      eventChannel.onmessage = (event) => {
+        const next = reduceTaskEvent(taskRef.current, event);
+        if (next === taskRef.current) return; // stale, duplicate or post-terminal
+        taskRef.current = next;
+        setTask(next);
+        if (!next) return;
+        switch (event.type) {
+          case "planning":
+            streamed = "";
+            setCopilotState("thinking");
+            break;
+          case "screen_capture_requested":
+            void snapshotScreen().then(async (capture) => {
+              if (!capture.image) throw new Error("Share a screen with Cue before asking it to inspect the screen.");
+              await invoke("update_task_screen", {
+                taskId: event.task_id,
+                screenImage: capture.image,
+                screenWidth: capture.width,
+                screenHeight: capture.height,
+              });
+            }).catch((error: unknown) => {
+              setChatError(typeof error === "string" ? error : error instanceof Error ? error.message : "Couldn't refresh screen context.");
             });
-          }).catch((error: unknown) => {
-            setChatError(typeof error === "string" ? error : error instanceof Error ? error.message : "Couldn't refresh screen context.");
-          });
-          return;
-        }
-        if (label.startsWith("RESULT: ")) {
-          try {
-            const report = JSON.parse(label.slice("RESULT: ".length)) as { tool: string; status: string; message: string };
-            const text = report.message.slice(0, 160);
-            setCopilotState("acting");
+            break;
+          case "confirmation_required":
+            setPendingConfirmation(next.confirmation?.prompt ?? "");
+            setCopilotState("confirming");
+            break;
+          case "action_started":
+          case "action_proposed":
             setPendingConfirmation("");
-            setToolStatus(
-              report.status === "success" ? `Done: ${report.tool}`
-                : report.status === "declined" ? `Declined: ${report.tool} was not run`
-                : report.status === "cancelled" ? "Cancelled"
-                : report.status === "timed_out" ? `Timed out: ${text}`
-                : `Failed: ${text}`,
-            );
-          } catch {
-            setToolStatus("");
-          }
-          return;
+            setCopilotState("acting");
+            break;
+          default:
+            if (!next.confirmation) setPendingConfirmation("");
         }
-        if (label.startsWith("CONFIRM: ")) {
-          setPendingConfirmation(label.slice("CONFIRM: ".length));
-          setToolStatus("");
-          setCopilotState("confirming");
-        } else {
-          setToolStatus(label);
-          setCopilotState("acting");
-        }
+        setToolStatus(statusLine(next));
       };
       stream.onmessage = (delta) => {
         setToolStatus("");
@@ -1397,7 +1401,7 @@ function App() {
         webTools: webTools && !strictLocal,
         strictLocal,
         onDelta: stream,
-        onTool: toolChannel,
+        onEvent: eventChannel,
       });
       setMessages([
         ...nextMessages,
@@ -1973,6 +1977,29 @@ function App() {
                         </div>
                       </article>
                     ))}
+                    {task && task.items.length + (task.outcome ? 1 : 0) > 0 && (
+                      <section className={`task-activity phase-${task.phase}`} aria-label="Cue's actions" aria-live="polite">
+                        <ol>
+                          {task.items.map((item) => (
+                            <li key={item.callId} className={`activity-${item.status}`}>
+                              <span className="activity-state">{({
+                                proposed: "Queued", awaiting_confirmation: "Needs approval", running: "Running",
+                                success: "Done", error: "Failed", cancelled: "Cancelled", timed_out: "Timed out", declined: "Declined",
+                              } as const)[item.status]}</span>
+                              <span className="activity-text">{item.description}</span>
+                              {item.detail && (item.status === "error" || item.status === "timed_out") && (
+                                <span className="activity-detail">{item.detail}</span>
+                              )}
+                            </li>
+                          ))}
+                        </ol>
+                        {task.outcome && (
+                          <p className={`task-outcome outcome-${task.outcome.state}`}>
+                            <strong>{outcomeLabel(task.outcome.state)}.</strong> {task.outcome.summary}
+                          </p>
+                        )}
+                      </section>
+                    )}
                     {isSending && (
                       <div className="message assistant">
                         <span className="message-avatar">V</span>
