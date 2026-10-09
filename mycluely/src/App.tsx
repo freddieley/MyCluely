@@ -12,7 +12,10 @@ type CopilotState =
   | "idle"
   | "listening"
   | "thinking"
-  | "responding";
+  | "acting"
+  | "confirming"
+  | "responding"
+  | "error";
 
 type AssistantPersonality =
   | "wingmate"
@@ -40,10 +43,10 @@ const HOTKEY_CHOICES = ["CommandOrControl+Shift+Space", "CommandOrControl+Alt+Sp
 const SHORTCUT_GROUPS: { group: string; items: [string, string][] }[] = [
   {
     group: "Anywhere (global)",
-    items: [["Ctrl+Shift+Space", "Start/stop voice note"]],
+    items: [["GLOBAL", "Summon Cue & focus the message box"]],
   },
   {
-    group: "Talk to Vela",
+    group: "Talk to Cue",
     items: [
       ["Ctrl+L", "Open chat & focus the message box"],
       ["Enter", "Send message"],
@@ -80,18 +83,23 @@ const SHORTCUT_GROUPS: { group: string; items: [string, string][] }[] = [
   },
 ];
 const FALLBACK_SUGGESTIONS = [
-  "Help me prep for an interview",
-  "Make this sound more confident",
-  "Give me a clever way to start",
-  "Talk me through a tough decision",
-  "Explain something I keep avoiding",
-  "Draft a reply I've been dreading",
-  "Roast my plan, kindly",
-  "Teach me something in two minutes",
+  "Open VS Code",
+  "Search the web for React docs",
+  "What am I looking at?",
+  "Write a note on my desktop",
+  "Open my text editor",
+  "Find a file in Documents",
+  "Help me organize these files",
+  "Type a message for me",
 ];
 
 function pickFallbackSuggestions() {
   return [...FALLBACK_SUGGESTIONS].sort(() => Math.random() - 0.5).slice(0, 3);
+}
+
+function formatHotkey(shortcut: string) {
+  const modifier = /Macintosh|Mac OS X/.test(navigator.userAgent) ? "⌘" : "Ctrl";
+  return shortcut.replace("CommandOrControl", modifier);
 }
 
 const personalities: Record<
@@ -150,6 +158,7 @@ function App() {
     () => window.localStorage.getItem("vela.webTools") !== "false",
   );
   const [toolStatus, setToolStatus] = useState("");
+  const [pendingConfirmation, setPendingConfirmation] = useState("");
   const [chatError, setChatError] =
     useState("");
 
@@ -184,6 +193,8 @@ function App() {
   );
   const [consentPrompt, setConsentPrompt] = useState(false);
   const startMeetingCaptureRef = useRef<() => Promise<void>>(async () => {});
+  const openPanelRef = useRef<(view: "chat" | "settings") => Promise<void>>(async () => {});
+  const cancelTaskRef = useRef<() => Promise<void>>(async () => {});
   const [localAiStatus, setLocalAiStatus] = useState<LocalAiStatus | null>(null);
   const [localModel, setLocalModel] = useState(
     () => window.localStorage.getItem("vela.model") ?? "",
@@ -371,7 +382,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isTauri() || !settingsOpen || provider !== "local") return;
     invoke<LocalAiStatus>("get_local_ai_status")
       .then((status) => {
         setLocalAiStatus(status);
@@ -387,7 +398,7 @@ function App() {
         console.error("Couldn't check local model availability:", error);
         setLocalStatusMessage("Couldn't check whether Ollama is running.");
       });
-  }, []);
+  }, [settingsOpen, provider]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -398,57 +409,7 @@ function App() {
     window.localStorage.setItem("vela.alwaysOnTop", String(alwaysOnTop));
   }, [alwaysOnTop]);
 
-  const [suggestions, setSuggestions] = useState<string[]>(() => pickFallbackSuggestions());
-  const [welcome, setWelcome] = useState<{ title: string; body: string } | null>(null);
-  const noMessages = messages.length === 0;
-  const providerReady =
-    provider === "openai" ? apiKeyPresent : Boolean(localModel);
-  useEffect(() => {
-    if (!isTauri() || !expanded || !noMessages || !providerReady) return;
-    let cancelled = false;
-    setSuggestions(pickFallbackSuggestions());
-    setWelcome(null);
-    const sink = new Channel<string>();
-    sink.onmessage = () => {};
-    const seed = Math.random().toString(36).slice(2, 8);
-    invoke<string>("send_chat_message", {
-      messages: [
-        {
-          role: "user",
-          content:
-            `Write a welcome screen for the user (variety seed: ${seed}). Line 1: a short punchy greeting headline in your personality, under 8 words. Line 2: one warm sentence under 20 words inviting them to start. Lines 3-5: 3 fresh, specific, varied conversation starters a user might tap to begin chatting with you. ` +
-            "Mix topics: work, writing, decisions, social situations, learning, ideas. " +
-            "Each starter is under 7 words, written as something the user would say to you. " +
-            "Reply with exactly 5 lines, no numbering, bullets, quotes, labels or extra text.",
-        },
-      ],
-      personality,
-      provider,
-      model: localModel,
-      fullPrivacy,
-      screenImage: null,
-      webTools: false,
-      onDelta: sink,
-      onTool: new Channel<string>(),
-    })
-      .then((reply) => {
-        const lines = reply
-          .split("\n")
-          .map((line) => line.replace(/^[\s\-*\d.)"“]+|["”\s]+$/g, "").trim())
-          .filter((line) => line.length > 3 && line.length <= 160);
-        if (!cancelled && lines.length === 5) {
-          setWelcome({ title: lines[0], body: lines[1] });
-          setSuggestions(lines.slice(2).filter((line) => line.length <= 60));
-        }
-      })
-      .catch((error: unknown) => {
-        console.error("Couldn't generate suggestions:", error);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [expanded, noMessages, providerReady, personality, provider, localModel, fullPrivacy]);
-
+  const [suggestions] = useState<string[]>(() => pickFallbackSuggestions());
   const lastMessageCount = useRef(0);
   useEffect(() => {
     // Only jump down when a new message is added, never while a reply streams in.
@@ -772,7 +733,7 @@ function App() {
       setMicrophoneStatus("Ready");
       if (voiceTranscriptRef.current) {
         setDraft(voiceTranscriptRef.current);
-        await openPanel("chat");
+        await openPanelRef.current("chat");
       }
     }
   };
@@ -820,14 +781,16 @@ function App() {
               return;
             }
 
-            await toggleListening();
+            await invoke("show_controller");
+            await openPanel("chat");
+            window.setTimeout(() => composerRef.current?.focus(), 50);
           },
         );
 
         } catch (error) {
-        console.error("Failed to register Vela hotkey:", error);
+        console.error("Failed to register Cue hotkey:", error);
         if (mounted) {
-          setHotkeyError(`Vela couldn't claim ${hotkey}. Another app may be using it. Pick a different shortcut in Settings > General.`);
+          setHotkeyError(`Cue couldn't claim ${hotkey}. Another app may be using it. Pick a different shortcut in Settings.`);
         }
       }
     };
@@ -840,7 +803,7 @@ function App() {
       unregister(hotkey).catch(
         (error) => {
           console.error(
-            "Failed to unregister Vela hotkey:",
+            "Failed to unregister Cue hotkey:",
             error,
           );
         },
@@ -910,10 +873,11 @@ function App() {
 
       setExpanded(true);
     } catch (error) {
-      console.error("Failed to expand Vela:", error);
+      console.error("Failed to expand Cue:", error);
       setChatError("Couldn't open the assistant panel. Try again.");
     }
   };
+  openPanelRef.current = openPanel;
 
   const collapsePanel = async () => {
     try {
@@ -925,7 +889,7 @@ function App() {
       setSettingsOpen(false);
       setChatError("");
     } catch (error) {
-      console.error("Failed to collapse Vela:", error);
+      console.error("Failed to collapse Cue:", error);
       setChatError("Couldn't close the assistant panel. Try again.");
     }
   };
@@ -936,7 +900,8 @@ function App() {
     const key = event.key;
 
     if (key === "Escape") {
-      if (shortcutsOpen) setShortcutsOpen(false);
+      if (isSending) void cancelTaskRef.current();
+      else if (shortcutsOpen) setShortcutsOpen(false);
       else if (settingsOpen) void openPanel("chat");
       else if (expanded) void collapsePanel();
       return;
@@ -993,7 +958,7 @@ function App() {
     }
 
     if (!isTauri()) {
-      setCredentialStatus("Save your API key from the Vela desktop app.");
+      setCredentialStatus("Save your API key from the Cue desktop app.");
       return;
     }
 
@@ -1002,7 +967,7 @@ function App() {
       await invoke("save_api_key", { apiKey });
       setApiKeyPresent(true);
       setApiKeyInput("");
-      setCredentialStatus("Saved securely in your system keychain.");
+      setCredentialStatus("Saved securely in your system credential store.");
     } catch (error) {
       console.error("Failed to save API key:", error);
       setCredentialStatus(
@@ -1013,7 +978,7 @@ function App() {
 
   const removeApiKey = async () => {
     if (!isTauri()) {
-      setCredentialStatus("Manage your API key from the Vela desktop app.");
+      setCredentialStatus("Manage your API key from the Cue desktop app.");
       return;
     }
 
@@ -1043,9 +1008,11 @@ function App() {
     }
   };
 
+  const setupBusy = Boolean(localSetup?.progress?.active);
   useEffect(() => {
+    if (!isTauri() || !settingsOpen || provider !== "local") return;
     let stop = false;
-    let wasActive = false;
+    let wasActive = setupBusy;
     const tick = async () => {
       try {
         const setup = await invoke<NonNullable<typeof localSetup>>("get_local_ai_setup");
@@ -1057,18 +1024,33 @@ function App() {
       } catch { /* ignore */ }
     };
     void tick();
-    const id = window.setInterval(() => void tick(), 1500);
+    if (!setupBusy) return () => { stop = true; };
+    const id = window.setInterval(() => void tick(), 5000);
     return () => { stop = true; window.clearInterval(id); };
-  }, []);
+  }, [settingsOpen, provider, setupBusy]);
 
   const refreshLocalModelsRef = useRef<() => Promise<void>>(async () => {});
 
   const startLocalAction = async (command: string, args?: Record<string, unknown>) => {
+    const isSetupAction = command === "install_local_ai" || command === "pull_model";
+    if (isSetupAction) {
+      setLocalSetup((current) => current ? {
+        ...current,
+        progress: { active: true, label: "Starting", percent: -1, error: null },
+      } : current);
+    }
     try {
       await invoke(command, args);
       setLocalStatusMessage("");
     } catch (error) {
-      setLocalStatusMessage(typeof error === "string" ? error : "That didn't work.");
+      const message = typeof error === "string" ? error : "That didn't work.";
+      setLocalStatusMessage(message);
+      if (isSetupAction) {
+        setLocalSetup((current) => current ? {
+          ...current,
+          progress: { active: false, label: "", percent: 100, error: message },
+        } : current);
+      }
     }
   };
 
@@ -1249,19 +1231,24 @@ function App() {
   };
 
   const snapshotScreen = async () => {
-    if (!screenSharing || !screenVideoRef.current) return undefined;
+    if (!screenSharing || !screenVideoRef.current) {
+      return { image: undefined, width: 0, height: 0 };
+    }
     const video = screenVideoRef.current;
     await new Promise<void>((resolve) => {
       if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) resolve();
       else video.addEventListener("loadeddata", () => resolve(), { once: true });
     });
-    const scale = Math.min(1, 1280 / video.videoWidth);
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+    if (!width || !height) return { image: undefined, width: 0, height: 0 };
+    const scale = Math.min(1, 1280 / width);
     const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
-    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
     canvas.getContext("2d")?.drawImage(video, 0, 0, canvas.width, canvas.height);
     const jpeg = canvas.toDataURL("image/jpeg", 0.65).split(",", 2)[1];
-    return jpeg;
+    return { image: jpeg, width, height };
   };
 
   const speakText = async (rawText: string) => {
@@ -1285,11 +1272,32 @@ function App() {
       console.error("Bundled voice failed:", error);
     }
     if (fullPrivacyRef.current || !("speechSynthesis" in window)) {
-      setChatError("Vela's built-in voice couldn't play this reply.");
+      setChatError("Cue's built-in voice couldn't play this reply.");
       return;
     }
     window.speechSynthesis.cancel();
     window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+  };
+
+  const cancelCurrentTask = async () => {
+    setPendingConfirmation("");
+    setToolStatus("");
+    try {
+      await invoke("cancel_active_task");
+    } catch (error) {
+      console.error("Couldn't cancel Cue's task:", error);
+    }
+  };
+  cancelTaskRef.current = cancelCurrentTask;
+
+  const answerConfirmation = async (approved: boolean) => {
+    setPendingConfirmation("");
+    setCopilotState(approved ? "acting" : "thinking");
+    try {
+      await invoke("respond_to_confirmation", { approved });
+    } catch (error) {
+      setChatError(typeof error === "string" ? error : "That confirmation is no longer active.");
+    }
   };
 
   const sendMessage = async (messageText: string) => {
@@ -1299,7 +1307,7 @@ function App() {
     }
 
     if (!isTauri()) {
-      setChatError("Chat is available in the Vela desktop app.");
+      setChatError("Chat is available in the Cue desktop app.");
       return;
     }
 
@@ -1320,27 +1328,54 @@ function App() {
     setDraft("");
     setChatError("");
     setIsSending(true);
+    setCopilotState("thinking");
 
+    let failed = false;
     try {
-      const screenImage = await snapshotScreen();
+      const screen = await snapshotScreen();
       const stream = new Channel<string>();
       let streamed = "";
       setMessages([...nextMessages, { role: "assistant", content: "" }]);
       const toolChannel = new Channel<string>();
-      toolChannel.onmessage = (label) => setToolStatus(label);
+      toolChannel.onmessage = (label) => {
+        if (label === "CAPTURE_SCREEN") {
+          void snapshotScreen().then(async (capture) => {
+            if (!capture.image) throw new Error("Share a screen with Cue before asking it to inspect the screen.");
+            await invoke("update_task_screen", {
+              screenImage: capture.image,
+              screenWidth: capture.width,
+              screenHeight: capture.height,
+            });
+          }).catch((error: unknown) => {
+            setChatError(typeof error === "string" ? error : error instanceof Error ? error.message : "Couldn't refresh screen context.");
+          });
+          return;
+        }
+        if (label.startsWith("CONFIRM: ")) {
+          setPendingConfirmation(label.slice("CONFIRM: ".length));
+          setToolStatus("");
+          setCopilotState("confirming");
+        } else {
+          setToolStatus(label);
+          setCopilotState("acting");
+        }
+      };
       stream.onmessage = (delta) => {
         setToolStatus("");
+        setCopilotState("responding");
         streamed += delta;
         const snapshot = streamed;
         setMessages([...nextMessages, { role: "assistant", content: snapshot }]);
       };
       const reply = await invoke<string>("send_chat_message", {
-        messages: nextMessages.slice(-12),
+        messages: nextMessages.slice(-8),
         personality,
         provider,
         model: localModel,
         fullPrivacy,
-        screenImage: screenImage ?? null,
+        screenImage: screen.image ?? null,
+        screenWidth: screen.width,
+        screenHeight: screen.height,
         webTools: webTools && !strictLocal,
         strictLocal,
         onDelta: stream,
@@ -1352,6 +1387,7 @@ function App() {
       ]);
       speakText(reply);
     } catch (error) {
+      failed = true;
       console.error("Assistant request failed:", error);
       setMessages(nextMessages.slice(0, -1));
       setDraft(content);
@@ -1363,6 +1399,9 @@ function App() {
     } finally {
       setIsSending(false);
       setToolStatus("");
+      setPendingConfirmation("");
+      if (screenSharing) stopScreenContext();
+      setCopilotState(failed ? "error" : "idle");
     }
   };
 
@@ -1385,7 +1424,13 @@ function App() {
         ? microphoneStatus
         : copilotState === "thinking"
           ? "Thinking"
-          : "Responding";
+          : copilotState === "acting"
+            ? toolStatus || "Operating your computer"
+            : copilotState === "confirming"
+              ? "Waiting for your approval"
+              : copilotState === "error"
+                ? "Something went wrong"
+                : "Responding";
 
   startMeetingCaptureRef.current = startMeetingCapture;
   const recordingActive = copilotState === "listening" || meetingCapture;
@@ -1415,7 +1460,7 @@ function App() {
             <img className="brand-mark" src="/vela-mark.svg" alt="" />
 
             <span className="brand-name">
-              Vela
+              Cue
             </span>
           </div>
 
@@ -1454,10 +1499,20 @@ function App() {
                   <div className="responding-pulse" />
                 )}
 
-                {copilotState === "idle" && (
+                {copilotState === "acting" && (
+                  <div className="acting-pulse" />
+                )}
+
+                {copilotState === "confirming" && (
+                  <div className="confirm-indicator">!</div>
+                )}
+
+                {(copilotState === "idle" || copilotState === "error") && (
                   <div
                     className={
-                      meetingCapture
+                      copilotState === "error"
+                        ? "error-dot"
+                        : meetingCapture
                         ? "recording-dot"
                         : microphoneStatus === "Microphone unavailable"
                         ? "error-dot"
@@ -1481,7 +1536,7 @@ function App() {
             type="button"
             className={`icon-button${alwaysOnTop ? " active" : ""}`}
             onClick={() => setAlwaysOnTop((value) => !value)}
-            aria-label={alwaysOnTop ? "Unlock Vela from the top of the screen" : "Keep Vela on top of the screen"}
+            aria-label={alwaysOnTop ? "Unlock Cue from the top of the screen" : "Keep Cue on top of the screen"}
             aria-pressed={alwaysOnTop}
             title={alwaysOnTop ? "Pinned above other windows" : "Keep on top"}
           >
@@ -1505,7 +1560,7 @@ function App() {
             title={
               copilotState === "listening"
                 ? "Stop recording to transcribe your voice note"
-                : "Record a voice message (Ctrl+Shift+Space)"
+                : "Record a voice message (Ctrl+Shift+M)"
             }
             disabled={isTranscribing}
           >
@@ -1528,6 +1583,20 @@ function App() {
               </svg>
             )}
           </button>
+
+          {isSending && (
+            <button
+              type="button"
+              className="icon-button stop-task-button"
+              onClick={() => void cancelCurrentTask()}
+              aria-label="Stop Cue's current task"
+              title="Stop task"
+            >
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+              </svg>
+            </button>
+          )}
 
           <button
             type="button"
@@ -1600,20 +1669,40 @@ function App() {
         <div className="recording-banner" role="status">
           <span className="rec-dot" aria-hidden="true" />
           <strong>RECORDING</strong>
-          <span>{meetingCapture ? "Capturing meeting audio. Use Stop capture to end it." : `Listening to your microphone. Press ${hotkey.replace("CommandOrControl", "Ctrl")} to stop.`}</span>
+          <span>{meetingCapture ? "Capturing meeting audio. Use Stop capture to end it." : `Listening to your microphone. Press ${formatHotkey(hotkey)} to stop.`}</span>
+        </div>
+      )}
+      {pendingConfirmation && (
+        <div className="confirmation-overlay" role="alertdialog" aria-modal="true" aria-labelledby="confirmation-title">
+          <section className="confirmation-card">
+            <div className="eyebrow">YOUR APPROVAL</div>
+            <h2 id="confirmation-title">Cue needs your confirmation</h2>
+            <p>{pendingConfirmation}</p>
+            <div className="confirmation-actions">
+              <button type="button" className="remove-key-button" onClick={() => void answerConfirmation(false)}>Cancel</button>
+              <button type="button" className="save-key-button" onClick={() => void answerConfirmation(true)}>Approve</button>
+            </div>
+          </section>
         </div>
       )}
       {expanded && !onboarded && (
-        <section className="assistant-panel" aria-label="Welcome to Vela">
+        <section className="assistant-panel" aria-label="Welcome to Cue">
           <div className="settings-page onboarding">
             <div className="panel-heading">
               <div className="eyebrow">WELCOME</div>
-              <h1>Meet Vela.</h1>
-              <p>Your keyboard-first assistant that floats above everything.</p>
+              <h1>Meet Cue.</h1>
+              <p>Control your computer with your voice or a quick message.</p>
             </div>
             <div className="provider-card">
-              <p className="provider-copy"><strong>Your shortcut:</strong> press <kbd>{hotkey.replace("CommandOrControl", "Ctrl")}</kbd> from any app to start or stop voice capture. Press <kbd>Ctrl</kbd> <kbd>/</kbd> any time to see every shortcut.</p>
-              <p className="provider-copy">Choose where Vela thinks in Settings: Cloud with your own OpenAI key, or On-device AI that runs on this PC. Vela is available for Windows only.</p>
+              <p className="provider-copy"><strong>Summon Cue:</strong> press <kbd>{formatHotkey(hotkey)}</kbd> from any app to open Cue and focus the message box. Turn on the microphone when you want to speak.</p>
+              <p className="provider-copy">Cue uses your OpenAI API key or an on-device Ollama model. Your key is stored in the system credential store; relevant messages and optional screen snapshots are sent to the selected provider.</p>
+              {!apiKeyPresent && provider === "openai" && (
+                <div className="key-entry">
+                  <input type="password" autoComplete="new-password" value={apiKeyInput} onChange={(event) => setApiKeyInput(event.target.value)} placeholder="OpenAI API key" aria-label="OpenAI API key" />
+                  <button type="button" className="save-key-button" onClick={() => void saveApiKey()}>Save key</button>
+                </div>
+              )}
+              {credentialStatus && <p className="credential-status" role="status">{credentialStatus}</p>}
               {hotkeyError && <p className="credential-status" role="alert">{hotkeyError}</p>}
             </div>
             <button type="button" className="back-to-chat" onClick={() => { window.localStorage.setItem("vela.onboarded", "true"); setOnboarded(true); }}>
@@ -1626,7 +1715,7 @@ function App() {
         <div className="shortcuts-overlay" role="dialog" aria-label="Recording consent" onClick={() => setConsentPrompt(false)}>
           <div className="shortcuts-card" onClick={(event) => event.stopPropagation()}>
             <div className="shortcuts-head"><strong>Before you record a meeting</strong></div>
-            <p className="provider-copy">Recording or transcribing other people may require their consent where you live. You are responsible for informing participants and following local law and your organization's policies. Vela does not store audio; transcripts stay in this session unless you keep them.</p>
+            <p className="provider-copy">Recording or transcribing other people may require their consent where you live. You are responsible for informing participants and following local law and your organization's policies. Cue does not store audio; transcripts stay in this session unless you keep them.</p>
             <div className="key-entry">
               <button type="button" className="save-key-button" onClick={() => {
                 window.localStorage.setItem("vela.recordingConsent", "true");
@@ -1640,7 +1729,7 @@ function App() {
         </div>
       )}
       {expanded && onboarded && (
-        <section className="assistant-panel" aria-label="Vela assistant">
+        <section className="assistant-panel" aria-label="Cue assistant">
           {settingsOpen ? (
             <div className="settings-page">
               <div className="panel-heading">
@@ -1669,7 +1758,7 @@ function App() {
                 <div className="provider-title">
                   <div>
                     <div className="eyebrow">YOUR PRIVACY, YOUR CALL</div>
-                    <h2>Choose where Vela thinks</h2>
+                    <h2>Choose where Cue thinks</h2>
                   </div>
                 </div>
                 <div className="provider-choice" role="group" aria-label="AI provider">
@@ -1686,7 +1775,7 @@ function App() {
                 </label>
                 <label className="privacy-toggle">
                   <input type="checkbox" checked={strictLocal} onChange={(event) => chooseStrictLocal(event.target.checked)} />
-                  <span><strong>Strict Local Mode</strong><small>Private Mode plus no web access. Vela's AI features send nothing over the network.</small></span>
+                  <span><strong>Strict Local Mode</strong><small>Private Mode plus no web access. Cue's AI features send nothing over the network.</small></span>
                 </label>
                 {provider === "local" && (
                   <div className="local-model-setup">
@@ -1705,14 +1794,14 @@ function App() {
                     <p className="provider-copy">
                       {localAiStatus?.available
                         ? `${localAiStatus.totalMemoryGb} GB RAM · ${localAiStatus.cpuThreads} CPU threads · Suggested: ${localAiStatus.recommendedModel}. Actual speed depends on your hardware.`
-                        : "Install and start Ollama, then pull a model such as qwen3:4b. Vela will never silently fall back to the cloud."}
+                        : "Install and start Ollama, then pull a model such as qwen3:4b. Cue will never silently fall back to the cloud."}
                     </p>
                   </div>
                 )}
                 <div className="local-model-setup">
                   {localSetup && !localSetup.installed && !localSetup.running && (
                     <>
-                      <p className="provider-copy">Run Vela on this PC: install the on-device AI engine and {localSetup.defaultModel} (about 2.5 GB download).</p>
+                      <p className="provider-copy">Run Cue on this PC: install the on-device AI engine and {localSetup.defaultModel} (about 2.5 GB download).</p>
                       <button type="button" className="save-key-button" disabled={Boolean(localSetup.progress?.active)} onClick={() => void startLocalAction("install_local_ai")}>Install On-device AI</button>
                     </>
                   )}
@@ -1750,7 +1839,7 @@ function App() {
                     {apiKeyPresent ? "Connected" : "Not connected"}
                   </span>
                 </div>
-                <p className="provider-copy">Your key stays in your system keychain. Cloud chat and transcription are sent to OpenAI only when Cloud is selected. If you turn on screen context in Cloud mode, the screenshot is sent to OpenAI with your message. Vela never saves screenshots to disk.</p>
+                <p className="provider-copy">Your key stays in your system credential store. Cloud chat and transcription are sent to OpenAI only when Cloud is selected. If you turn on screen context in Cloud mode, one screenshot is sent with your message. Cue never saves screenshots to disk.</p>
                 <div className="key-entry">
                   <input
                     type="password"
@@ -1778,18 +1867,18 @@ function App() {
                 <div className="provider-card feature-settings">
                   <div className="eyebrow">YOUR FLOW</div>
                   <div className="hotkey-row">
-                    <label htmlFor="hotkey-select"><strong>Voice shortcut</strong></label>
+                    <label htmlFor="hotkey-select"><strong>Summon Cue shortcut</strong></label>
                     <select id="hotkey-select" value={hotkey} onChange={(event) => {
                       setHotkey(event.target.value);
                       window.localStorage.setItem("vela.hotkey", event.target.value);
                     }}>
-                      {HOTKEY_CHOICES.map((choice) => <option key={choice} value={choice}>{choice.replace("CommandOrControl", "Ctrl")}</option>)}
+                      {HOTKEY_CHOICES.map((choice) => <option key={choice} value={choice}>{formatHotkey(choice)}</option>)}
                     </select>
                   </div>
                   {hotkeyError && <p className="credential-status" role="alert">{hotkeyError}</p>}
                   <label className="privacy-toggle">
                     <input type="checkbox" checked={alwaysOnTop} onChange={(event) => setAlwaysOnTop(event.target.checked)} />
-                    <span><strong>Keep the Vela bar on top</strong><small>Pin the floating assistant above other windows.</small></span>
+                    <span><strong>Keep the Cue bar on top</strong><small>Pin the floating assistant above other windows.</small></span>
                   </label>
                   <label className="privacy-toggle">
                     <input type="checkbox" checked={speakReplies} onChange={(event) => {
@@ -1804,7 +1893,7 @@ function App() {
                       setWebTools(event.target.checked);
                       window.localStorage.setItem("vela.webTools", String(event.target.checked));
                     }} />
-                    <span><strong>Web access</strong><small>{strictLocal ? "Disabled by Strict Local Mode." : fullPrivacy ? "The model stays on this device, but search queries and page requests are sent to the websites involved." : "Lets Vela search the web and browse pages in a real headless browser, following links like a person."}</small></span>
+                    <span><strong>Web access</strong><small>{strictLocal ? "Disabled by Strict Local Mode." : fullPrivacy ? "The model stays on this device, but search queries and page requests are sent to the websites involved." : "Lets Cue search the web and browse pages in a real headless browser, following links like a person."}</small></span>
                   </label>
                   <button type="button" className="remove-key-button" onClick={() => window.speechSynthesis?.cancel()}>Stop speaking</button>
                 </div>
@@ -1812,7 +1901,7 @@ function App() {
                   <p className="credential-status" role="status">{credentialStatus}</p>
                 )}
               </div>
-              <p className="provider-copy">Vela is available for Windows only. Screen context is captured only when you turn it on and is never saved to disk.</p>
+              <p className="provider-copy">Screen context is captured only after you choose a screen and is attached only when you send a message. Snapshots aren't saved to disk.</p>
               <button type="button" className="remove-key-button" onClick={() => setShortcutsOpen(true)}>Keyboard shortcuts (Ctrl+/)</button>
               <button type="button" className="back-to-chat" onClick={() => void openPanel("chat")}>
                 Back to chat <span aria-hidden="true">→</span>
@@ -1825,8 +1914,8 @@ function App() {
                   <div className="welcome-card">
                     <div className="welcome-orb"><span /></div>
                     <div className="eyebrow">YOUR {personalities[personality].label.toUpperCase()}</div>
-                    <h1>{welcome?.title ?? "Hey, I’m in your corner."}</h1>
-                    <p>{welcome?.body ?? "Bring me the awkward bit, the big question, or the blank page. We’ll figure it out together."}</p>
+                    <h1>What should we do?</h1>
+                    <p>Tell Cue what you want done, and it will take the next step.</p>
                     <div className="suggestion-list">
                       {suggestions.map((suggestion) => (
                         <button
@@ -1920,7 +2009,7 @@ function App() {
                       }
                     }}
                     placeholder={screenSharing ? "Ask about anything on your screen…" : "Tell me what’s on your mind…"}
-                    aria-label="Message Vela"
+                    aria-label="Message Cue"
                     rows={1}
                     maxLength={8000}
                     disabled={isSending}
@@ -1964,16 +2053,19 @@ function App() {
             {SHORTCUT_GROUPS.map(({ group, items }) => (
               <div key={group} className="shortcuts-group">
                 <h3>{group}</h3>
-                {items.map(([keys, label]) => (
-                  <div key={keys} className="shortcut-row">
-                    <span>{label}</span>
-                    <span className="kbd-set">
-                      {keys.split(" or ").map((combo, i) => (
-                        <span key={combo}>{i > 0 && " or "}{combo.split("+").map((k, j) => <kbd key={j}>{k}</kbd>)}</span>
-                      ))}
-                    </span>
-                  </div>
-                ))}
+                {items.map(([keys, label]) => {
+                  const displayedKeys = keys === "GLOBAL" ? formatHotkey(hotkey) : keys;
+                  return (
+                    <div key={keys} className="shortcut-row">
+                      <span>{label}</span>
+                      <span className="kbd-set">
+                        {displayedKeys.split(" or ").map((combo, i) => (
+                          <span key={combo}>{i > 0 && " or "}{combo.split("+").map((k, j) => <kbd key={j}>{k}</kbd>)}</span>
+                        ))}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             ))}
           </div>
